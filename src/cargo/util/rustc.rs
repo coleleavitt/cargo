@@ -265,9 +265,12 @@ impl Cache {
                 return Ok((output.stdout.clone(), output.stderr.clone()));
             }
             Some(_) => {
-                // Previously cached a failure. Remove it so we retry the command,
-                // since failures may be transient (e.g., a rustc wrapper like
-                // sccache intermittently failing).
+                // A previously-cached failure was found. Failures from prior
+                // cargo versions (or a partially-corrupted cache file) may end
+                // up here. Drop the entry and retry the command — the failure
+                // may have been transient (e.g., a rustc wrapper like sccache
+                // intermittently failing on startup races or network blips).
+                // See rust-lang/cargo#15358.
                 debug!("rustc info cache hit, but cached output was a failure; retrying");
                 self.data.outputs.remove(&key);
                 self.dirty = true;
@@ -300,8 +303,13 @@ impl Cache {
             self.dirty = true;
             Ok((stdout, stderr))
         } else {
-            // Don't cache failures — they may be transient (e.g., a wrapper
-            // process like sccache failing due to a temporary server issue).
+            // Failures are intentionally not cached. The cache fingerprint is
+            // derived from the rustc/wrapper binary mtime+size and toolchain
+            // metadata (see `rustc_fingerprint`), none of which change when a
+            // wrapper recovers from a transient error. Caching the failure
+            // would replay it on every subsequent build until the user
+            // manually deletes `target/.rustc_info.json`.
+            // See rust-lang/cargo#15358 and rust-lang/cargo#14385.
             Err(ProcessError::new_raw(
                 &format!("process didn't exit successfully: {}", cmd),
                 output.status.code(),
