@@ -9,6 +9,7 @@ use cargo_test_support::{basic_manifest, project};
 const MISS: &str = "[..] rustc info cache miss[..]";
 const HIT: &str = "[..]rustc info cache hit[..]";
 const UPDATE: &str = "[..]updated rustc info cache[..]";
+const RETRY: &str = "[..]cached output was a failure; retrying[..]";
 
 #[cargo_test]
 fn rustc_info_cache() {
@@ -252,6 +253,58 @@ fn rustc_info_cache_transient_failure_recovery() {
         .with_stderr_contains(MISS)
         .with_stderr_does_not_contain(HIT)
         .with_stderr_contains(UPDATE)
+        .with_status(0)
+        .run();
+}
+
+/// Backward-compat: cache files written by older cargo versions may contain
+/// failure entries (`"success": false`). Verify that those entries are
+/// detected, dropped, and the command is retried rather than replayed.
+#[cargo_test]
+fn rustc_info_cache_drops_legacy_failure_entries() {
+    let p = project()
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    // First build: populates `.rustc_info.json` with successful entries.
+    p.cargo("build").with_status(0).run();
+
+    let cache_path = p.root().join("target/.rustc_info.json");
+    let raw = std::fs::read_to_string(&cache_path).unwrap();
+    let mut cache: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    // Simulate a cache file written by older cargo: flip every cached output's
+    // `success` field to false and inject a failure-shaped stderr.
+    let outputs = cache
+        .get_mut("outputs")
+        .and_then(|v| v.as_object_mut())
+        .expect("cache should have outputs object");
+    assert!(
+        !outputs.is_empty(),
+        "first build should have populated cache outputs"
+    );
+    for (_key, entry) in outputs.iter_mut() {
+        let obj = entry.as_object_mut().unwrap();
+        obj.insert("success".to_string(), serde_json::Value::Bool(false));
+        obj.insert(
+            "status".to_string(),
+            serde_json::Value::String("exit status: 1".to_string()),
+        );
+        obj.insert("code".to_string(), serde_json::json!(1));
+        obj.insert(
+            "stderr".to_string(),
+            serde_json::Value::String("stale wrapper failure".to_string()),
+        );
+    }
+    std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+
+    // Second build: cargo should see the cached failures, drop them, and re-run
+    // the rustc probes. The build must succeed and never surface the stale
+    // failure stderr.
+    p.cargo("build")
+        .env("CARGO_LOG", "cargo::util::rustc=debug")
+        .with_stderr_contains(RETRY)
+        .with_stderr_does_not_contain("[..]stale wrapper failure[..]")
         .with_status(0)
         .run();
 }
