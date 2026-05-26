@@ -194,9 +194,29 @@ fn rustc_info_cache_transient_failure_recovery() {
     let wrapper_project = project()
         .at("wrapper")
         .file("Cargo.toml", &basic_bin_manifest("wrapper"))
-        .file("src/main.rs", r#"fn main() { }"#)
+        .file(
+            "src/main.rs",
+            r#"
+            fn main() {
+                let mut args = std::env::args_os();
+                let _me = args.next().unwrap();
+                let rustc = args.next().unwrap();
+
+                let fail_flag = std::env::var_os("WRAPPER_FAIL_FLAG").unwrap();
+                if std::fs::read_to_string(fail_flag).unwrap().trim() == "fail" {
+                    eprintln!("wrapper: error: Operation not permitted (os error 1)");
+                    std::process::exit(1);
+                }
+
+                let status = std::process::Command::new(rustc).args(args).status().unwrap();
+                std::process::exit(status.code().unwrap_or(1))
+            }
+            "#,
+        )
         .build();
     let wrapper = wrapper_project.bin("wrapper");
+    let fail_flag = wrapper_project.root().join("fail-flag");
+    std::fs::write(&fail_flag, "fail").unwrap();
 
     let p = project()
         .file(
@@ -212,44 +232,28 @@ fn rustc_info_cache_transient_failure_recovery() {
         .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
         .build();
 
-    // Build a wrapper that fails (simulates a transient sccache failure).
-    wrapper_project.change_file(
-        "src/main.rs",
-        r#"
-        fn main() {
-            eprintln!("wrapper: error: Operation not permitted (os error 1)");
-            std::process::exit(1);
-        }
-        "#,
-    );
     wrapper_project.cargo("build").with_status(0).run();
 
     p.cargo("build")
         .env("CARGO_LOG", "cargo::util::rustc=debug")
         .env("RUSTC_WRAPPER", &wrapper)
+        .env("WRAPPER_FAIL_FLAG", &fail_flag)
         .with_stderr_contains("[..]Operation not permitted[..]")
+        .with_stderr_contains(MISS)
+        .with_stderr_does_not_contain(HIT)
+        .with_stderr_does_not_contain(UPDATE)
         .with_status(101)
         .run();
 
-    // Now fix the wrapper (simulates sccache recovering).
-    wrapper_project.change_file(
-        "src/main.rs",
-        r#"
-        fn main() {
-            let mut args = std::env::args_os();
-            let _me = args.next().unwrap();
-            let rustc = args.next().unwrap();
-            let status = std::process::Command::new(rustc).args(args).status().unwrap();
-            std::process::exit(if status.success() { 0 } else { 1 })
-        }
-        "#,
-    );
-    wrapper_project.cargo("build").with_status(0).run();
+    // The same wrapper binary now recovers. Its path, mtime, and size are
+    // unchanged, so this covers the cache key that used to replay stale failures.
+    std::fs::write(&fail_flag, "ok").unwrap();
 
     // The build should now succeed — the previous failure must not be cached.
     p.cargo("build")
         .env("CARGO_LOG", "cargo::util::rustc=debug")
         .env("RUSTC_WRAPPER", &wrapper)
+        .env("WRAPPER_FAIL_FLAG", &fail_flag)
         .with_stderr_contains(MISS)
         .with_stderr_does_not_contain(HIT)
         .with_stderr_contains(UPDATE)
