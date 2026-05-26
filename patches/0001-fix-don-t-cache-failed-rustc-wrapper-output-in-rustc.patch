@@ -1,0 +1,227 @@
+From 4ae09958f4643d96c2621e78369ec615f4159e8d Mon Sep 17 00:00:00 2001
+From: Cole Leavitt <cole@unwrap.rs>
+Date: Fri, 15 May 2026 10:30:21 -0700
+Subject: [PATCH 1/2] fix: don't cache failed rustc-wrapper output in rustc
+ info cache
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a rustc wrapper (e.g., sccache) fails transiently, the failure
+output was cached in target/.rustc_info.json and replayed on every
+subsequent build. Since the cache fingerprint is based on binary
+mtime/size and toolchain metadata — not runtime state — the cached
+failure was never invalidated, requiring manual deletion of the file.
+
+This changes cached_output() to only persist successful command results.
+Failed outputs are returned as errors but not inserted into the cache,
+allowing subsequent builds to retry the command and succeed once the
+transient issue resolves.
+
+Also skip writing the cache file on Drop when there are no cached
+outputs to persist.
+---
+ src/cargo/util/rustc.rs             | 79 ++++++++++++++++++-----------
+ tests/testsuite/rustc_info_cache.rs | 77 ++++++++++++++++++++++++++--
+ 2 files changed, 121 insertions(+), 35 deletions(-)
+
+diff --git a/src/cargo/util/rustc.rs b/src/cargo/util/rustc.rs
+index 42c06ecab..2f5cba4a0 100644
+--- a/src/cargo/util/rustc.rs
++++ b/src/cargo/util/rustc.rs
+@@ -259,41 +259,55 @@ impl Cache {
+         extra_fingerprint: u64,
+     ) -> CargoResult<(String, String)> {
+         let key = process_fingerprint(cmd, extra_fingerprint);
+-        if let std::collections::hash_map::Entry::Vacant(e) = self.data.outputs.entry(key) {
+-            debug!("rustc info cache miss");
+-            debug!("running {}", cmd);
+-            let output = cmd.output()?;
+-            let stdout = String::from_utf8(output.stdout)
+-                .map_err(|e| anyhow::anyhow!("{}: {:?}", e, e.as_bytes()))
+-                .with_context(|| format!("`{}` didn't return utf8 output", cmd))?;
+-            let stderr = String::from_utf8(output.stderr)
+-                .map_err(|e| anyhow::anyhow!("{}: {:?}", e, e.as_bytes()))
+-                .with_context(|| format!("`{}` didn't return utf8 output", cmd))?;
+-            e.insert(Output {
+-                success: output.status.success(),
+-                status: if output.status.success() {
+-                    String::new()
+-                } else {
+-                    cargo_util::exit_status_to_string(output.status)
+-                },
+-                code: output.status.code(),
+-                stdout,
+-                stderr,
+-            });
+-            self.dirty = true;
+-        } else {
+-            debug!("rustc info cache hit");
++        match self.data.outputs.get(&key) {
++            Some(output) if output.success => {
++                debug!("rustc info cache hit");
++                return Ok((output.stdout.clone(), output.stderr.clone()));
++            }
++            Some(_) => {
++                // Previously cached a failure. Remove it so we retry the command,
++                // since failures may be transient (e.g., a rustc wrapper like
++                // sccache intermittently failing).
++                debug!("rustc info cache hit, but cached output was a failure; retrying");
++                self.data.outputs.remove(&key);
++                self.dirty = true;
++            }
++            None => {
++                debug!("rustc info cache miss");
++            }
+         }
+-        let output = &self.data.outputs[&key];
+-        if output.success {
+-            Ok((output.stdout.clone(), output.stderr.clone()))
++
++        debug!("running {}", cmd);
++        let output = cmd.output()?;
++        let stdout = String::from_utf8(output.stdout)
++            .map_err(|e| anyhow::anyhow!("{}: {:?}", e, e.as_bytes()))
++            .with_context(|| format!("`{}` didn't return utf8 output", cmd))?;
++        let stderr = String::from_utf8(output.stderr)
++            .map_err(|e| anyhow::anyhow!("{}: {:?}", e, e.as_bytes()))
++            .with_context(|| format!("`{}` didn't return utf8 output", cmd))?;
++
++        if output.status.success() {
++            self.data.outputs.insert(
++                key,
++                Output {
++                    success: true,
++                    status: String::new(),
++                    code: output.status.code(),
++                    stdout: stdout.clone(),
++                    stderr: stderr.clone(),
++                },
++            );
++            self.dirty = true;
++            Ok((stdout, stderr))
+         } else {
++            // Don't cache failures — they may be transient (e.g., a wrapper
++            // process like sccache failing due to a temporary server issue).
+             Err(ProcessError::new_raw(
+                 &format!("process didn't exit successfully: {}", cmd),
+-                output.code,
+-                &output.status,
+-                Some(output.stdout.as_ref()),
+-                Some(output.stderr.as_ref()),
++                output.status.code(),
++                &cargo_util::exit_status_to_string(output.status),
++                Some(stdout.as_ref()),
++                Some(stderr.as_ref()),
+             )
+             .into())
+         }
+@@ -305,6 +319,9 @@ impl Drop for Cache {
+         if !self.dirty {
+             return;
+         }
++        if self.data.outputs.is_empty() && self.data.successes.is_empty() {
++            return;
++        }
+         if let Some(ref path) = self.cache_location {
+             let json = serde_json::to_string(&self.data).unwrap();
+             match paths::write(path, json.as_bytes()) {
+diff --git a/tests/testsuite/rustc_info_cache.rs b/tests/testsuite/rustc_info_cache.rs
+index 8fa729aeb..5ac142271 100644
+--- a/tests/testsuite/rustc_info_cache.rs
++++ b/tests/testsuite/rustc_info_cache.rs
+@@ -171,18 +171,87 @@ fn rustc_info_cache_with_wrappers() {
+             .env(wrapper_env, &wrapper)
+             .with_stderr_contains("[..]different compiler, creating new rustc info cache[..]")
+             .with_stderr_contains(MISS)
+-            .with_stderr_contains(UPDATE)
+             .with_stderr_does_not_contain(HIT)
++            .with_stderr_does_not_contain(UPDATE)
+             .with_status(101)
+             .run();
++        // Failures are not cached — a subsequent run should retry the command
++        // rather than replaying the cached failure.
+         p.cargo("build")
+             .env("CARGO_LOG", "cargo::util::rustc=debug")
+             .env(wrapper_env, &wrapper)
+-            .with_stderr_contains("[..]reusing existing rustc info cache[..]")
+-            .with_stderr_contains(HIT)
++            .with_stderr_contains(MISS)
++            .with_stderr_does_not_contain(HIT)
+             .with_stderr_does_not_contain(UPDATE)
+-            .with_stderr_does_not_contain(MISS)
+             .with_status(101)
+             .run();
+     }
+ }
++
++#[cargo_test]
++fn rustc_info_cache_transient_failure_recovery() {
++    let wrapper_project = project()
++        .at("wrapper")
++        .file("Cargo.toml", &basic_bin_manifest("wrapper"))
++        .file("src/main.rs", r#"fn main() { }"#)
++        .build();
++    let wrapper = wrapper_project.bin("wrapper");
++
++    let p = project()
++        .file(
++            "Cargo.toml",
++            r#"
++                [package]
++                name = "test"
++                version = "0.0.0"
++                authors = []
++                [workspace]
++            "#,
++        )
++        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
++        .build();
++
++    // Build a wrapper that fails (simulates a transient sccache failure).
++    wrapper_project.change_file(
++        "src/main.rs",
++        r#"
++        fn main() {
++            eprintln!("wrapper: error: Operation not permitted (os error 1)");
++            std::process::exit(1);
++        }
++        "#,
++    );
++    wrapper_project.cargo("build").with_status(0).run();
++
++    p.cargo("build")
++        .env("CARGO_LOG", "cargo::util::rustc=debug")
++        .env("RUSTC_WRAPPER", &wrapper)
++        .with_stderr_contains("[..]Operation not permitted[..]")
++        .with_status(101)
++        .run();
++
++    // Now fix the wrapper (simulates sccache recovering).
++    wrapper_project.change_file(
++        "src/main.rs",
++        r#"
++        fn main() {
++            let mut args = std::env::args_os();
++            let _me = args.next().unwrap();
++            let rustc = args.next().unwrap();
++            let status = std::process::Command::new(rustc).args(args).status().unwrap();
++            std::process::exit(if status.success() { 0 } else { 1 })
++        }
++        "#,
++    );
++    wrapper_project.cargo("build").with_status(0).run();
++
++    // The build should now succeed — the previous failure must not be cached.
++    p.cargo("build")
++        .env("CARGO_LOG", "cargo::util::rustc=debug")
++        .env("RUSTC_WRAPPER", &wrapper)
++        .with_stderr_contains(MISS)
++        .with_stderr_does_not_contain(HIT)
++        .with_stderr_contains(UPDATE)
++        .with_status(0)
++        .run();
++}
+-- 
+2.53.0
+

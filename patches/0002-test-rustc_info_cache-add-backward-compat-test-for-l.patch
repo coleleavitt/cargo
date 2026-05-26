@@ -1,0 +1,127 @@
+From 92cb08d462c7a5e56b0a5a2f1a2fb8bcdffeab00 Mon Sep 17 00:00:00 2001
+From: Cole Leavitt <cole@unwrap.rs>
+Date: Tue, 26 May 2026 12:13:09 -0700
+Subject: [PATCH 2/2] test(rustc_info_cache): add backward-compat test for
+ legacy failure entries
+
+Add rustc_info_cache_drops_legacy_failure_entries which simulates a
+cache file written by an older cargo (or partial corruption) where every
+output entry has success=false. Asserts that cargo detects the stale
+failures, drops them, retries the probes, and never surfaces the
+failure stderr in a successful build.
+
+Also expand the two non-caching comments in Cache::update_output and
+Cache::cached_output to explain *why* failures are not persisted and
+reference rust-lang/cargo#15358 + #14385 for future readers.
+---
+ src/cargo/util/rustc.rs             | 18 +++++++---
+ tests/testsuite/rustc_info_cache.rs | 53 +++++++++++++++++++++++++++++
+ 2 files changed, 66 insertions(+), 5 deletions(-)
+
+diff --git a/src/cargo/util/rustc.rs b/src/cargo/util/rustc.rs
+index 2f5cba4a0..761dd77c3 100644
+--- a/src/cargo/util/rustc.rs
++++ b/src/cargo/util/rustc.rs
+@@ -265,9 +265,12 @@ impl Cache {
+                 return Ok((output.stdout.clone(), output.stderr.clone()));
+             }
+             Some(_) => {
+-                // Previously cached a failure. Remove it so we retry the command,
+-                // since failures may be transient (e.g., a rustc wrapper like
+-                // sccache intermittently failing).
++                // A previously-cached failure was found. Failures from prior
++                // cargo versions (or a partially-corrupted cache file) may end
++                // up here. Drop the entry and retry the command — the failure
++                // may have been transient (e.g., a rustc wrapper like sccache
++                // intermittently failing on startup races or network blips).
++                // See rust-lang/cargo#15358.
+                 debug!("rustc info cache hit, but cached output was a failure; retrying");
+                 self.data.outputs.remove(&key);
+                 self.dirty = true;
+@@ -300,8 +303,13 @@ impl Cache {
+             self.dirty = true;
+             Ok((stdout, stderr))
+         } else {
+-            // Don't cache failures — they may be transient (e.g., a wrapper
+-            // process like sccache failing due to a temporary server issue).
++            // Failures are intentionally not cached. The cache fingerprint is
++            // derived from the rustc/wrapper binary mtime+size and toolchain
++            // metadata (see `rustc_fingerprint`), none of which change when a
++            // wrapper recovers from a transient error. Caching the failure
++            // would replay it on every subsequent build until the user
++            // manually deletes `target/.rustc_info.json`.
++            // See rust-lang/cargo#15358 and rust-lang/cargo#14385.
+             Err(ProcessError::new_raw(
+                 &format!("process didn't exit successfully: {}", cmd),
+                 output.status.code(),
+diff --git a/tests/testsuite/rustc_info_cache.rs b/tests/testsuite/rustc_info_cache.rs
+index 5ac142271..26dbb2017 100644
+--- a/tests/testsuite/rustc_info_cache.rs
++++ b/tests/testsuite/rustc_info_cache.rs
+@@ -9,6 +9,7 @@ use cargo_test_support::{basic_manifest, project};
+ const MISS: &str = "[..] rustc info cache miss[..]";
+ const HIT: &str = "[..]rustc info cache hit[..]";
+ const UPDATE: &str = "[..]updated rustc info cache[..]";
++const RETRY: &str = "[..]cached output was a failure; retrying[..]";
+ 
+ #[cargo_test]
+ fn rustc_info_cache() {
+@@ -255,3 +256,55 @@ fn rustc_info_cache_transient_failure_recovery() {
+         .with_status(0)
+         .run();
+ }
++
++/// Backward-compat: cache files written by older cargo versions may contain
++/// failure entries (`"success": false`). Verify that those entries are
++/// detected, dropped, and the command is retried rather than replayed.
++#[cargo_test]
++fn rustc_info_cache_drops_legacy_failure_entries() {
++    let p = project()
++        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
++        .build();
++
++    // First build: populates `.rustc_info.json` with successful entries.
++    p.cargo("build").with_status(0).run();
++
++    let cache_path = p.root().join("target/.rustc_info.json");
++    let raw = std::fs::read_to_string(&cache_path).unwrap();
++    let mut cache: serde_json::Value = serde_json::from_str(&raw).unwrap();
++
++    // Simulate a cache file written by older cargo: flip every cached output's
++    // `success` field to false and inject a failure-shaped stderr.
++    let outputs = cache
++        .get_mut("outputs")
++        .and_then(|v| v.as_object_mut())
++        .expect("cache should have outputs object");
++    assert!(
++        !outputs.is_empty(),
++        "first build should have populated cache outputs"
++    );
++    for (_key, entry) in outputs.iter_mut() {
++        let obj = entry.as_object_mut().unwrap();
++        obj.insert("success".to_string(), serde_json::Value::Bool(false));
++        obj.insert(
++            "status".to_string(),
++            serde_json::Value::String("exit status: 1".to_string()),
++        );
++        obj.insert("code".to_string(), serde_json::json!(1));
++        obj.insert(
++            "stderr".to_string(),
++            serde_json::Value::String("stale wrapper failure".to_string()),
++        );
++    }
++    std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
++
++    // Second build: cargo should see the cached failures, drop them, and re-run
++    // the rustc probes. The build must succeed and never surface the stale
++    // failure stderr.
++    p.cargo("build")
++        .env("CARGO_LOG", "cargo::util::rustc=debug")
++        .with_stderr_contains(RETRY)
++        .with_stderr_does_not_contain("[..]stale wrapper failure[..]")
++        .with_status(0)
++        .run();
++}
+-- 
+2.53.0
+
