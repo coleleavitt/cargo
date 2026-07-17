@@ -1,0 +1,591 @@
+# Instincts generated from https://github.com/coleleavitt/cargo
+# Generated: 2026-07-17T17:06:15.624Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: cargo-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: refactor, fix, feat, test, docs
+
+## Evidence
+
+- 100 commits analyzed
+- Detected conventional commit pattern
+- Examples: refactor(diag): Move deferred warnings to a diagnostic, fix(diag): Always include path in deferred diagnostics
+
+---
+id: cargo-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Commit Length
+
+## Action
+
+Write moderate-length commit messages (~53 characters)
+
+## Evidence
+
+- Average commit message length: 53 chars
+- Based on 100 commits
+
+---
+id: cargo-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: cargo-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: cargo-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: cargo-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: cargo-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: cargo-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: **/*.test.*
+
+---
+id: cargo-workflow-refactoring
+trigger: "when refactoring code"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Refactoring
+
+## Action
+
+Follow the refactoring workflow:
+1. Ensure tests pass before refactor
+2. Refactor code structure
+3. Verify tests still pass
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~19x per month
+- Files: src/**/*
+
+---
+id: cargo-workflow-refactor-diagnostics-rules-and-passes
+trigger: "when doing refactor diagnostics rules and passes"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Refactor Diagnostics Rules And Passes
+
+## Action
+
+Follow the refactor-diagnostics-rules-and-passes workflow:
+1. Edit multiple files in src/cargo/diagnostics/rules/ (often many *.rs and mod.rs)
+2. Edit src/cargo/diagnostics/passes.rs to change how passes/rules are registered or invoked
+3. Optionally edit src/cargo/diagnostics/mod.rs or src/cargo/diagnostics/lint.rs
+4. Update call sites in src/cargo/ops/cargo_compile/mod.rs and src/cargo/ops/cargo_fetch.rs if the interface changes
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: src/cargo/diagnostics/rules/*.rs, src/cargo/diagnostics/rules/mod.rs, src/cargo/diagnostics/passes.rs
+
+---
+id: cargo-workflow-fix-or-update-diagnostics-and-tests
+trigger: "when doing fix or update diagnostics and tests"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Fix Or Update Diagnostics And Tests
+
+## Action
+
+Follow the fix-or-update-diagnostics-and-tests workflow:
+1. Edit src/cargo/diagnostics/rules/deferred_parse_diagnostics.rs and/or related diagnostics files
+2. Edit src/cargo/core/workspace.rs (where diagnostics are invoked)
+3. Edit many files in tests/testsuite/ to update or add tests for the changed diagnostics behavior
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: src/cargo/diagnostics/rules/deferred_parse_diagnostics.rs, src/cargo/core/workspace.rs, tests/testsuite/*.rs
+
+---
+id: cargo-workflow-test-lints-optimization
+trigger: "when doing test lints optimization"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Test Lints Optimization
+
+## Action
+
+Follow the test-lints-optimization workflow:
+1. Edit many files in tests/testsuite/lints/ (including mod.rs and individual lint test files)
+2. Reduce or remove compilation steps where possible
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: tests/testsuite/lints/*.rs, tests/testsuite/lints/mod.rs
+
+---
+id: cargo-workflow-schema-feature-development
+trigger: "when doing schema feature development"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/cargo
+---
+
+# Cargo Workflow Schema Feature Development
+
+## Action
+
+Follow the schema-feature-development workflow:
+1. Edit or add files in crates/cargo-util-schemas/ (src/index.rs, *.schema.json)
+2. Edit src/cargo/sources/registry/ files as needed
+3. Optionally update related util or download logic
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: crates/cargo-util-schemas/src/index.rs, crates/cargo-util-schemas/*.schema.json, src/cargo/sources/registry/*.rs
+
+---
+id: cargo-instinct-filename-snake-case
+trigger: "When creating or renaming a file in the codebase"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Filename Snake Case
+
+## Action
+
+Use snake_case for file names
+
+## Evidence
+
+- Pattern in src/cargo/diagnostics/rules/*.rs
+- Pattern in tests/testsuite/lints/*.rs
+
+---
+id: cargo-instinct-function-camel-case
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Function Camel Case
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in Rust codebase
+- Naming conventions: functions: camelCase
+
+---
+id: cargo-instinct-class-pascal-case
+trigger: "When defining a struct or enum"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Class Pascal Case
+
+## Action
+
+Use PascalCase for type names
+
+## Evidence
+
+- Pattern in Rust codebase
+- Naming conventions: classes: PascalCase
+
+---
+id: cargo-instinct-constant-screaming-snake-case
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Constant Screaming Snake Case
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in Rust codebase
+- Naming conventions: constants: SCREAMING_SNAKE_CASE
+
+---
+id: cargo-instinct-relative-imports
+trigger: "When importing modules within the project"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Relative Imports
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- importStyle: relative
+- Pattern in src/ and crates/
+
+---
+id: cargo-instinct-named-exports
+trigger: "When exporting functions, types, or modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Named Exports
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- exportStyle: named
+- Pattern in mod.rs files
+
+---
+id: cargo-instinct-test-location-separate
+trigger: "When adding new tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Test Location Separate
+
+## Action
+
+Place tests in the tests/ directory, not alongside source files
+
+## Evidence
+
+- testLocation: separate
+- Pattern in tests/testsuite/*.rs
+
+---
+id: cargo-instinct-unit-tests
+trigger: "When writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Unit Tests
+
+## Action
+
+Write unit tests for new or changed features
+
+## Evidence
+
+- testTypes: unit
+- Pattern in tests/testsuite/
+
+---
+id: cargo-instinct-lints-test-optimization
+trigger: "When optimizing or refactoring lint tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Lints Test Optimization
+
+## Action
+
+Reduce or remove unnecessary compilation steps in tests/testsuite/lints/
+
+## Evidence
+
+- test-lints-optimization workflow
+- Commits: test(lints): Reduce build requirements for lint levels
+
+---
+id: cargo-instinct-conventional-commits
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Conventional Commits
+
+## Action
+
+Use conventional commit prefixes: refactor, fix, feat, test, docs
+
+## Evidence
+
+- Pattern in commit messages
+- Examples: refactor(diag): Move deferred warnings to a diagnostic
+
+---
+id: cargo-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Commit Length
+
+## Action
+
+Keep commit message subject lines around 53 characters
+
+## Evidence
+
+- averageLength: 53
+- Pattern in commit examples
+
+---
+id: cargo-instinct-refactor-diagnostics
+trigger: "When reorganizing or improving diagnostics/lints for maintainability or consistency"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Refactor Diagnostics
+
+## Action
+
+Edit multiple files in src/cargo/diagnostics/rules/, passes.rs, and update call sites in cargo_compile/mod.rs and cargo_fetch.rs if needed
+
+## Evidence
+
+- refactor-diagnostics-rules-and-passes workflow
+- Commits: refactor(diag): Increase the scope for package stats
+
+---
+id: cargo-instinct-fix-diagnostics-tests
+trigger: "When fixing bugs or improving consistency in diagnostics reporting"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Fix Diagnostics Tests
+
+## Action
+
+Edit diagnostics files, update src/cargo/core/workspace.rs, and update/add tests in tests/testsuite/
+
+## Evidence
+
+- fix-or-update-diagnostics-and-tests workflow
+- Commits: fix(diag): Always include path in deferred diagnostics
+
+---
+id: cargo-instinct-optimize-lint-tests
+trigger: "When optimizing lint-related tests for speed and efficiency"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Optimize Lint Tests
+
+## Action
+
+Edit tests/testsuite/lints/ files to reduce or remove compilation steps
+
+## Evidence
+
+- test-lints-optimization workflow
+- Commits: test(lints): Reduce build requirements for lint levels
+
+---
+id: cargo-instinct-add-schema-feature
+trigger: "When adding, exposing, or updating schema/config features for registries"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/cargo
+---
+
+# Cargo Instinct Add Schema Feature
+
+## Action
+
+Edit or add files in crates/cargo-util-schemas/ (src/index.rs, *.schema.json) and src/cargo/sources/registry/
+
+## Evidence
+
+- schema-feature-development workflow
+- Commits: feat(schema): Expose the Index's Registry Config
+
