@@ -1583,7 +1583,7 @@ impl hash::Hash for Fingerprint {
             name,
             public,
             fingerprint,
-            only_requires_rmeta: _, // static property, no need to hash
+            only_requires_rmeta: _,  // static property, no need to hash
             public_api_hash_path: _, // same
         } in deps
         {

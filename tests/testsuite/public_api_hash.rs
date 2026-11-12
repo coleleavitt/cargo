@@ -7,7 +7,13 @@ use cargo_test_support::{Project, project, str};
 /// The rustc under test must accept `-Zpublic-api-hash` (rust-lang/rust#156940).
 fn rustc_supports_public_api_hash() -> bool {
     std::process::Command::new("rustc")
-        .args(["-", "--crate-name", "___", "--print=sysroot", "-Zpublic-api-hash"])
+        .args([
+            "-",
+            "--crate-name",
+            "___",
+            "--print=sysroot",
+            "-Zpublic-api-hash",
+        ])
         .stdin(std::process::Stdio::null())
         .output()
         .is_ok_and(|output| output.status.success())
@@ -55,7 +61,10 @@ fn chain() -> Project {
                 edition = "2021"
             "#,
         )
-        .file("a/src/lib.rs", "mod imp;\npub fn value() -> u32 { imp::private() }\n")
+        .file(
+            "a/src/lib.rs",
+            "mod imp;\npub fn value() -> u32 { imp::private() }\n",
+        )
         .file("a/src/imp.rs", "pub(crate) fn private() -> u32 { 1 }\n")
         .build()
 }
