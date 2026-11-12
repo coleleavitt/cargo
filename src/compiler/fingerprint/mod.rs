@@ -1619,16 +1619,7 @@ fn calculate_normal(
     } else {
         let dep_info = dep_info_loc(build_runner, unit);
         let dep_info = dep_info.strip_prefix(&build_root).unwrap().to_path_buf();
-        let fingerprint = if build_runner.bcx.gctx.cli_unstable().checksum_freshness {
-            build_runner
-                .bcx
-                .gctx
-                .build_config()?
-                .fingerprint
-                .unwrap_or_default()
-        } else {
-            FingerprintMethod::Mtime
-        };
+        let fingerprint = fingerprint_method(build_runner.bcx)?;
         vec![LocalFingerprint::CheckDepInfo {
             dep_info,
             fingerprint,
@@ -2095,6 +2086,24 @@ fn _compare_old_fingerprint(
 }
 
 /// Calculates the fingerprint of a unit thats contains no dep-info files.
+/// The freshness method for local files.
+///
+/// Content checksums are the default when both Cargo and rustc are nightly:
+/// with mtimes, a build dir that is moved, copied, or shared between source
+/// trees treats another tree's output as fresh whenever this tree's files are
+/// older. `build.fingerprint = "mtime"` keeps the old behavior.
+pub fn fingerprint_method(bcx: &BuildContext<'_, '_>) -> CargoResult<FingerprintMethod> {
+    let gctx = bcx.gctx;
+    let content_available = gctx.cli_unstable().checksum_freshness
+        || (gctx.nightly_features_allowed
+            && matches!(bcx.rustc().version.pre.as_str(), "nightly" | "dev"));
+    Ok(match gctx.build_config()?.fingerprint {
+        Some(FingerprintMethod::Mtime) => FingerprintMethod::Mtime,
+        Some(FingerprintMethod::Content) | None if content_available => FingerprintMethod::Content,
+        Some(FingerprintMethod::Content) | None => FingerprintMethod::Mtime,
+    })
+}
+
 fn pkg_fingerprint(bcx: &BuildContext<'_, '_>, pkg: &Package) -> CargoResult<String> {
     let source_id = pkg.package_id().source_id();
     let sources = bcx.packages.sources();

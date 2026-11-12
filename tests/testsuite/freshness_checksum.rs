@@ -1721,3 +1721,88 @@ fn symlink_to_package() {
 "#]])
         .run();
 }
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn content_is_default_on_nightly() {
+    let p = project().file("src/main.rs", "fn main() {}").build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.root().move_into_the_future();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn mtime_fingerprint_still_selectable_on_nightly() {
+    let p = project().file("src/main.rs", "fn main() {}").build();
+
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "mtime")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.root().move_into_the_future();
+
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "mtime")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn shared_target_dir_other_tree_with_older_sources() {
+    // Two copies of the same package at different paths share one target dir.
+    // The units hash the same (workspace-relative paths), and the second
+    // tree's sources are older than the first tree's build.
+    let target = paths::root().join("shared-target");
+    let one = project()
+        .at("one")
+        .file("Cargo.toml", &basic_manifest("foo", "0.0.1"))
+        .file("src/main.rs", r#"fn main() { println!("one"); }"#)
+        .build();
+    let two = project()
+        .at("two")
+        .file("Cargo.toml", &basic_manifest("foo", "0.0.1"))
+        .file("src/main.rs", r#"fn main() { println!("two"); }"#)
+        .build();
+    two.root().move_into_the_past();
+
+    one.cargo("run")
+        .env("CARGO_TARGET_DIR", &target)
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stdout_data(str![[r#"
+one
+
+"#]])
+        .run();
+    two.cargo("run")
+        .env("CARGO_TARGET_DIR", &target)
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stdout_data(str![[r#"
+two
+
+"#]])
+        .run();
+}
