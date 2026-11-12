@@ -2439,6 +2439,10 @@ fn on_stderr_line_inner(
         artifact: Cow<'a, str>,
         /// Present with `-Zpublic-api-hash` on the metadata notification.
         public_api_hash: Option<String>,
+        /// Hash of the source positions dependents can copy into their own output (inlinable
+        /// and generic MIR, macros). Reported next to `public_api_hash` by rustc versions whose
+        /// `public_api_hash` ignores positions.
+        public_span_hash: Option<String>,
     }
 
     if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
@@ -2447,10 +2451,16 @@ fn on_stderr_line_inner(
             debug!("looks like metadata finished early!");
             // Written before dependents are unblocked, as they compare it in
             // `Job::resolve_cutoff`.
+            // A dependent may skip rustc only if both hashes are unchanged, so they are stored
+            // and compared together.
             if let (Some(path), Some(hash)) =
                 (&options.public_api_hash_path, &artifact.public_api_hash)
             {
-                paths::write(path, hash)?;
+                let hashes = match &artifact.public_span_hash {
+                    Some(span_hash) => format!("{hash} {span_hash}"),
+                    None => hash.clone(),
+                };
+                paths::write(path, hashes)?;
             }
             state.rmeta_produced();
         }

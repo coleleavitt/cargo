@@ -697,8 +697,8 @@ fn write_fingerprint_and_public_api_deps(
     })
 }
 
-/// With `-Zpublic-api-hash`, the file where `unit` stores the public API hash that rustc reports
-/// for its metadata. `None` unless `unit` is a library whose dependents can only use its
+/// With `-Zpublic-api-hash`, the file where `unit` stores the public API hash and public span
+/// hash that rustc reports for its metadata. `None` unless `unit` is a library whose dependents can only use its
 /// metadata (not a proc-macro, dylib or other linked output).
 pub fn public_api_hash_path(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> Option<PathBuf> {
     let metadata_only = matches!(unit.mode, CompileMode::Build | CompileMode::Check { .. })
