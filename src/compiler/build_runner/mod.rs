@@ -23,6 +23,7 @@ use super::fingerprint::{Checksum, Fingerprint};
 use super::job_queue::JobQueue;
 use super::layout::Layout;
 use super::lto::Lto;
+use super::unit_cache::UnitCache;
 use super::unit_graph::UnitDep;
 use super::unused_deps::UnusedDepState;
 use super::{BuildContext, Compilation, CompileKind, CompileMode, Executor, FileFlavor};
@@ -94,6 +95,9 @@ pub struct BuildRunner<'a, 'gctx> {
 
     /// Manages locks for build units when fine grain locking is enabled.
     pub lock_manager: Arc<LockManager>,
+
+    /// The per-user cache of compiled units, when enabled (`-Zunit-cache`).
+    pub unit_cache: Option<UnitCache>,
 }
 
 impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
@@ -135,6 +139,7 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
             failed_scrape_units: Arc::new(Mutex::new(HashSet::default())),
             unused_dep_state: UnusedDepState::new(bcx),
             lock_manager: Arc::new(LockManager::new()),
+            unit_cache: None,
         })
     }
 
@@ -177,6 +182,8 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
         let mut queue = JobQueue::new(self.bcx);
         self.lto = super::lto::generate(self.bcx)?;
         self.prepare_units()?;
+        // Before `prepare` creates the directories of all units.
+        self.unit_cache = UnitCache::restore(&self)?;
         self.prepare()?;
         custom_build::build_map(&mut self)?;
         self.check_collisions()?;

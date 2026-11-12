@@ -197,6 +197,7 @@ mod standard_lib;
 mod test;
 mod timings;
 mod tool_paths;
+mod unit_cache;
 mod unit_graph;
 mod update;
 mod utils;

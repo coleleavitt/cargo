@@ -451,6 +451,8 @@ pub struct CargoBuildConfig {
     /// Unstable feature `-Zchecksum-freshness`.
     pub fingerprint: Option<FingerprintMethod>,
     pub build_std: Option<BuildStdConfig>,
+    /// Unstable feature `-Zunit-cache`.
+    pub unit_cache_dir: Option<ConfigRelativePath>,
 }
 
 /// Metrics collection for build analysis.
