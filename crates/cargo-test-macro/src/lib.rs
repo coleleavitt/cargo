@@ -436,10 +436,12 @@ fn has_rustup_stable() -> bool {
         // This cannot run on rust-lang/rust CI due to the lack of rustup.
         return false;
     }
-    check_command(
-        Path::new("rustup"),
-        &["run", "stable", "cargo", "--version"],
-    )
+    // This machine has only a rustc-master toolchain; treat a missing stable
+    // toolchain as "ignore the test" instead of failing to compile the suite.
+    Command::new("rustup")
+        .args(["run", "stable", "cargo", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Whether or not this running in a Continuous Integration environment.
