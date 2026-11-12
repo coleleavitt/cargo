@@ -48,6 +48,10 @@ pub struct BuildConfig {
     pub timing_report: bool,
     /// Output SBOM precursor files.
     pub sbom: bool,
+    /// Make the unit hash of workspace path packages depend on the workspace's
+    /// absolute location, so worktrees sharing a build-dir do not reuse each
+    /// other's local artifacts.
+    pub isolate_workspace_units: bool,
     /// Build compile time dependencies only, e.g., build scripts and proc macros
     pub compile_time_deps_only: bool,
 }
@@ -113,6 +117,21 @@ impl BuildConfig {
             (None, _) => false,
         };
 
+        let isolate_requested = cfg.isolate_workspace_units.unwrap_or(false)
+            || gctx
+                .get_env("CARGO_ISOLATE_WORKSPACE_UNITS")
+                .is_ok_and(|v| v == "1" || v == "true");
+        let isolate_workspace_units = if gctx.cli_unstable().isolate_workspace_units {
+            true
+        } else if isolate_requested && !gctx.nightly_features_allowed {
+            gctx.shell().warn(
+                "ignoring `build.isolate-workspace-units`, it requires a nightly toolchain",
+            )?;
+            false
+        } else {
+            isolate_requested
+        };
+
         Ok(BuildConfig {
             requested_kinds,
             jobs,
@@ -129,6 +148,7 @@ impl BuildConfig {
             future_incompat_report: false,
             timing_report: false,
             sbom,
+            isolate_workspace_units,
             compile_time_deps_only: false,
         })
     }

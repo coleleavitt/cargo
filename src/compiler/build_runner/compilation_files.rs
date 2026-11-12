@@ -174,8 +174,16 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         target: HashMap<CompileTarget, Layout>,
     ) -> CompilationFiles<'a, 'gctx> {
         let mut metas = HashMap::default();
+        let isolated_ws_root = build_runner
+            .bcx
+            .build_config
+            .isolate_workspace_units
+            .then(|| {
+                let root = build_runner.bcx.ws.root();
+                std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned())
+            });
         for unit in &build_runner.bcx.roots {
-            metadata_of(unit, build_runner, &mut metas);
+            metadata_of(unit, build_runner, isolated_ws_root.as_deref(), &mut metas);
         }
         let outputs = metas
             .keys()
@@ -743,29 +751,34 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
 fn metadata_of<'a>(
     unit: &Unit,
     build_runner: &BuildRunner<'_, '_>,
+    isolated_ws_root: Option<&Path>,
     metas: &'a mut HashMap<Unit, Metadata>,
 ) -> &'a Metadata {
     if !metas.contains_key(unit) {
-        let meta = compute_metadata(unit, build_runner, metas);
+        let meta = compute_metadata(unit, build_runner, isolated_ws_root, metas);
         metas.insert(unit.clone(), meta);
         for dep in build_runner.unit_deps(unit) {
-            metadata_of(&dep.unit, build_runner, metas);
+            metadata_of(&dep.unit, build_runner, isolated_ws_root, metas);
         }
     }
     &metas[unit]
 }
 
 /// Computes the metadata hash for the given [`Unit`].
+///
+/// `isolated_ws_root` is the canonical workspace root when
+/// `build.isolate-workspace-units` is enabled.
 fn compute_metadata(
     unit: &Unit,
     build_runner: &BuildRunner<'_, '_>,
+    isolated_ws_root: Option<&Path>,
     metas: &mut HashMap<Unit, Metadata>,
 ) -> Metadata {
     let bcx = &build_runner.bcx;
     let deps_metadata = build_runner
         .unit_deps(unit)
         .iter()
-        .map(|dep| *metadata_of(&dep.unit, build_runner, metas))
+        .map(|dep| *metadata_of(&dep.unit, build_runner, isolated_ws_root, metas))
         .collect::<Vec<_>>();
     let c_extra_filename = use_extra_filename(bcx, unit);
     let pkg_dir = use_pkg_dir(bcx, unit);
@@ -894,6 +907,16 @@ fn compute_metadata(
         if !has_remap_path_prefix(&unit.rustflags) {
             unit.rustflags.hash(&mut unit_id_hasher);
         }
+    }
+    // Two checkouts of one workspace give their path packages the same
+    // workspace-relative `stable_hash`, so a shared build-dir would mix up their
+    // artifacts. Dependents pick this up through `dep_unit_id_hashes`. It stays
+    // out of `c_metadata` so symbol names do not depend on the checkout location.
+    if let Some(root) = isolated_ws_root
+        && unit.pkg.package_id().source_id().is_path()
+        && unit.pkg.root().starts_with(bcx.ws.root())
+    {
+        root.hash(&mut unit_id_hasher);
     }
 
     let c_metadata = UnitHash(Hasher::finish(&c_metadata_hasher));

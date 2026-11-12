@@ -444,6 +444,8 @@ pub struct CargoBuildConfig {
     pub warnings: Option<WarningHandling>,
     /// Unstable feature `-Zsbom`.
     pub sbom: Option<bool>,
+    /// Unstable feature `-Zisolate-workspace-units`.
+    pub isolate_workspace_units: Option<bool>,
     /// Unstable feature `-Zbuild-analysis`.
     pub analysis: Option<CargoBuildAnalysis>,
     /// Unstable feature `-Zchecksum-freshness`.

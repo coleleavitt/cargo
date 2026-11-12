@@ -907,6 +907,7 @@ unstable_cli_options!(
     hint_min_opt_level: bool = ("Enable the `hints.min-opt-level` manifest key"),
     hint_msrv: bool = ("Enable passing `package.rust-version` to rustc for lints"),
     host_config: bool = ("Enable the `[host]` section in the .cargo/config.toml file"),
+    isolate_workspace_units: bool = ("Hash the absolute workspace root into the unit hash of workspace path packages"),
     json_target_spec: bool = ("Enable `.json` target spec files"),
     mem_stats: bool = ("Report peak memory usage per build unit in --timings output"),
     minimal_versions: bool = ("Resolve minimal dependency versions instead of maximum"),
@@ -1448,6 +1449,7 @@ impl CliUnstable {
             }
             "hint-min-opt-level" => self.hint_min_opt_level = parse_empty(k, v)?,
             "host-config" => self.host_config = parse_empty(k, v)?,
+            "isolate-workspace-units" => self.isolate_workspace_units = parse_empty(k, v)?,
             "json-target-spec" => self.json_target_spec = parse_empty(k, v)?,
             "hint-msrv" => self.hint_msrv = parse_empty(k, v)?,
             "next-lockfile-bump" => self.next_lockfile_bump = parse_empty(k, v)?,

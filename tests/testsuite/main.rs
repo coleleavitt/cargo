@@ -123,6 +123,7 @@ mod https;
 mod inheritable_workspace_fields;
 mod install;
 mod install_upgrade;
+mod isolate_workspace_units;
 mod jobserver;
 mod lints;
 mod lints_table;
