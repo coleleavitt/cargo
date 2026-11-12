@@ -1,5 +1,5 @@
 //! Tests for `-Zpublic-api-hash`: library dependents are not recompiled when a dependency's
-//! public API hash is unchanged.
+//! public API hash and public span hash are unchanged.
 
 use crate::prelude::*;
 use cargo_test_support::{Project, project, str};
@@ -19,8 +19,7 @@ fn rustc_supports_public_api_hash() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// `foo` (bin) -> `b` (lib) -> `a` (lib). `a`'s private function is in a submodule file: any edit
-/// of the crate root file changes the public API hash, as the crate root's span covers it.
+/// `foo` (bin) -> `b` (lib) -> `a` (lib).
 fn chain() -> Project {
     project()
         .file(
@@ -232,4 +231,188 @@ fn public_const_value_change_rebuilds_dependents() {
 
 "#]])
         .run();
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn crate_root_private_edit_skips_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let p = chain();
+    p.change_file(
+        "a/src/lib.rs",
+        "pub fn value() -> u32 { private() }\nfn private() -> u32 { 1 }\n",
+    );
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .run();
+
+    // The private function moves and changes in the crate root file.
+    p.change_file(
+        "a/src/lib.rs",
+        "pub fn value() -> u32 { private() }\n\n\nfn private() -> u32 {\n    2\n}\n",
+    );
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stdout_data(str![[r#"
+2
+
+"#]])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[WARNING] function `unused` is never used
+...
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn line_shift_above_non_generic_fn_skips_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let p = chain();
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .run();
+
+    // `value`'s code is not copied into dependents, so its new position does not matter to them.
+    p.change_file(
+        "a/src/lib.rs",
+        "\n\nmod imp;\npub fn value() -> u32 { imp::private() }\n",
+    );
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stdout_data(str![[r#"
+1
+
+"#]])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[WARNING] function `unused` is never used
+...
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}
+
+/// `foo` (bin) runs `b::run()`, which calls `a`'s `boom`, which panics. `b` compiles its own copy
+/// of `boom` when `boom` is generic or `#[inline]`, including `boom`'s panic location.
+fn panic_chain(a_lib: &str, b_lib: &str) -> Project {
+    project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                b = { path = "b" }
+            "#,
+        )
+        .file("src/main.rs", "fn main() { b::run(); }")
+        .file(
+            "b/Cargo.toml",
+            r#"
+                [package]
+                name = "b"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                a = { path = "../a" }
+            "#,
+        )
+        .file("b/src/lib.rs", b_lib)
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.1.0"
+                edition = "2021"
+            "#,
+        )
+        .file("a/src/lib.rs", a_lib)
+        .build()
+}
+
+/// Shifts `boom` two lines down and checks that `b` is recompiled and that the panic location
+/// is `new_location`, the same as in a clean build.
+fn line_shift_rebuilds_dependents(a_lib: &str, b_lib: &str, new_location: &str) {
+    let p = panic_chain(a_lib, b_lib);
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .run();
+
+    p.change_file("a/src/lib.rs", &format!("\n\n{a_lib}"));
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[COMPILING] b v0.1.0 ([ROOT]/foo/b)
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    let panic = format!("[..]panicked at {new_location}:[..]");
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_status(101)
+        .with_stderr_contains(&panic)
+        .run();
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .env("CARGO_TARGET_DIR", p.root().join("clean-target"))
+        .with_status(101)
+        .with_stderr_contains(&panic)
+        .run();
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn line_shift_above_generic_fn_rebuilds_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    line_shift_rebuilds_dependents(
+        "pub fn boom<T>(_: T) {\n    panic!(\"boom\");\n}\n",
+        "pub fn run() { a::boom(1u8) }\n",
+        "a/src/lib.rs:4:5",
+    );
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn line_shift_above_inline_fn_rebuilds_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    line_shift_rebuilds_dependents(
+        "#[inline]\npub fn boom() {\n    panic!(\"boom\");\n}\n",
+        "pub fn run() { a::boom() }\n",
+        "a/src/lib.rs:5:5",
+    )
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn line_shift_above_track_caller_generic_fn_rebuilds_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    // `boom` reports its caller's location, and its caller `relay` is generic, so `b`'s copy of
+    // `relay` holds a position in `a`.
+    line_shift_rebuilds_dependents(
+        "#[track_caller]\nfn boom() {\n    panic!(\"boom\");\n}\npub fn relay<T>(_: T) {\n    boom();\n}\n",
+        "pub fn run() { a::relay(1u8) }\n",
+        "a/src/lib.rs:8:5",
+    )
 }
