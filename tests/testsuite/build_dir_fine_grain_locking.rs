@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use crate::prelude::*;
 use cargo_test_support::registry::{Package, RegistryBuilder};
-use cargo_test_support::{paths, prelude::*, project, str};
+use cargo_test_support::{Execs, Project, paths, prelude::*, project, str};
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 
 #[cargo_test]
@@ -1381,6 +1381,530 @@ fn new_layout_opt_out() {
 [ROOT]/foo/target-dir/debug/foo.d
 
 "#]]);
+}
+
+fn fine_grain(p: &Project, args: &str) -> Execs {
+    let mut e = p.cargo(args);
+    e.arg("-Zfine-grain-locking")
+        .masquerade_as_nightly_cargo(&["fine grain locking"]);
+    e
+}
+
+/// Source of a library that takes a moment to check, so that concurrent builds overlap.
+fn slow_lib() -> String {
+    (0..300)
+        .map(|k| {
+            format!(
+                "pub fn f{k}(x: u64) -> u64 {{ (0..{}).fold(x, |a, b| a.wrapping_mul(31).rotate_left(b) ^ {k}) }}\n",
+                k % 40 + 1
+            )
+        })
+        .collect()
+}
+
+/// Spawns `cmds` at once and waits for all of them. Fails if they do not finish in time, which
+/// would be a lock wait cycle, or if one fails. Returns the stderr of each.
+fn run_concurrently(cmds: Vec<std::process::Command>) -> Vec<String> {
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let logs: Vec<_> = (0..cmds.len())
+        .map(|i| paths::root().join(format!("stderr-{i}.log")))
+        .collect();
+    let mut children: Vec<_> = cmds
+        .into_iter()
+        .zip(&logs)
+        .map(|(mut cmd, log)| {
+            cmd.stdout(Stdio::null())
+                .stderr(std::fs::File::create(log).unwrap());
+            cmd.spawn().unwrap()
+        })
+        .collect();
+    let read_logs = || -> Vec<String> {
+        logs.iter()
+            .map(|log| std::fs::read_to_string(log).unwrap())
+            .collect()
+    };
+    let deadline = Instant::now() + cargo_test_support::slow_cpu_multiplier(60);
+    while children.iter_mut().any(|c| c.try_wait().unwrap().is_none()) {
+        if Instant::now() > deadline {
+            for c in &mut children {
+                let _ = c.kill();
+            }
+            panic!(
+                "concurrent builds did not finish:\n{}",
+                read_logs().join("\n----\n")
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let stderr = read_logs();
+    for (c, err) in children.iter_mut().zip(&stderr) {
+        assert!(c.wait().unwrap().success(), "a build failed:\n{err}");
+    }
+    stderr
+}
+
+/// The crates that a `-v` build ran rustc for, from its stderr.
+fn rustc_runs(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter(|line| line.trim_start().starts_with("Running `"))
+        .filter_map(|line| line.split("--crate-name ").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .map(str::to_string)
+        .collect()
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+#[cargo_test]
+fn concurrent_builds_of_one_workspace_compile_each_unit_once() {
+    // The shape of cargo#17508: both builds plan every unit as dirty. Each must not keep the units
+    // that it built locked while it waits for the ones that the other is building, and must use
+    // those once they are built instead of compiling them again.
+    let mut p = project().file(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"app\", \"dep*\"]\nresolver = \"3\"\n",
+    );
+    let mut deps = String::new();
+    for i in 1..=8 {
+        p = p
+            .file(
+                &format!("dep{i}/Cargo.toml"),
+                &format!("[package]\nname = \"dep{i}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .file(&format!("dep{i}/src/lib.rs"), &slow_lib());
+        deps.push_str(&format!("dep{i} = {{ path = \"../dep{i}\" }}\n"));
+    }
+    let p = p
+        .file(
+            "app/Cargo.toml",
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{deps}"
+            ),
+        )
+        .file(
+            "app/src/main.rs",
+            "fn main() { println!(\"{}\", dep1::f1(1) ^ dep8::f1(8)); }",
+        )
+        .build();
+    let expected: Vec<_> = (1..=8)
+        .map(|i| format!("dep{i}"))
+        .chain(["app".to_string()])
+        .collect();
+
+    for _ in 0..3 {
+        let _ = std::fs::remove_dir_all(p.root().join("target"));
+        let stderr = run_concurrently(
+            (0..2)
+                .map(|_| fine_grain(&p, "check -v -p app").build_command())
+                .collect(),
+        );
+        let runs = stderr.iter().flat_map(|s| rustc_runs(s)).collect();
+        assert_eq!(
+            sorted(runs),
+            sorted(expected.clone()),
+            "each unit is compiled by one build:\n{}",
+            stderr.join("\n----\n")
+        );
+    }
+}
+
+#[cargo_test]
+fn concurrent_builds_sharing_a_build_dir_reuse_each_others_units() {
+    // Like two worktrees of one repository with a shared build directory. The units of registry
+    // crates are the same for both, including a build script whose output both builds need.
+    let mut deps = String::new();
+    for i in 0..6 {
+        Package::new(&format!("shared{i}"), "1.0.0")
+            .file("src/lib.rs", &slow_lib())
+            .publish();
+        deps.push_str(&format!("shared{i} = \"1.0\"\n"));
+    }
+    Package::new("scripted", "1.0.0")
+        .links("scripted")
+        .file(
+            "Cargo.toml",
+            "[package]\nname = \"scripted\"\nversion = \"1.0.0\"\nlinks = \"scripted\"\n",
+        )
+        .file(
+            "build.rs",
+            r#"fn main() {
+                println!("cargo::rerun-if-changed=build.rs");
+                println!("cargo::metadata=value=42");
+                println!("cargo::rustc-env=SCRIPTED=yes");
+            }"#,
+        )
+        .file(
+            "src/lib.rs",
+            "pub fn scripted() -> &'static str { env!(\"SCRIPTED\") }",
+        )
+        .publish();
+    let projects: Vec<_> = ["first", "second"]
+        .iter()
+        .map(|name| {
+            project()
+                .at(name)
+                .file(
+                    "Cargo.toml",
+                    &format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nscripted = \"1.0\"\n{deps}"
+                    ),
+                )
+                .file(
+                    "build.rs",
+                    r#"fn main() {
+                        let value = std::env::var("DEP_SCRIPTED_VALUE").unwrap();
+                        println!("cargo::rustc-env=VALUE={value}");
+                    }"#,
+                )
+                .file(
+                    "src/main.rs",
+                    r#"fn main() {
+                        println!("{} {}", env!("VALUE"), scripted::scripted());
+                        let _ = (shared0::f1(1), shared5::f1(5));
+                    }"#,
+                )
+                .build()
+        })
+        .collect();
+
+    for round in 0..2 {
+        let build_dir = paths::root().join(format!("shared-build-{round}"));
+        let stderr = run_concurrently(
+            projects
+                .iter()
+                .map(|p| {
+                    fine_grain(p, "build -v")
+                        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+                        .build_command()
+                })
+                .collect(),
+        );
+        let runs: Vec<_> = stderr.iter().flat_map(|s| rustc_runs(s)).collect();
+        let expected: Vec<_> = (0..6)
+            .map(|i| format!("shared{i}"))
+            .chain(["scripted", "build_script_build", "first", "second"].map(String::from))
+            .chain(["build_script_build"; 2].map(String::from))
+            .collect();
+        assert_eq!(
+            sorted(runs),
+            sorted(expected),
+            "shared units are compiled by one build:\n{}",
+            stderr.join("\n----\n")
+        );
+        let script_runs = stderr
+            .iter()
+            .flat_map(|s| s.lines())
+            .filter(|line| {
+                line.contains("Running `")
+                    && !line.contains("--crate-name")
+                    && line.contains("/build/scripted/")
+            })
+            .count();
+        assert_eq!(script_runs, 1, "{}", stderr.join("\n----\n"));
+        for (p, name) in projects.iter().zip(["first", "second"]) {
+            p.process(p.bin(name))
+                .with_stdout_data(str![[r#"
+42 yes
+
+"#]])
+                .run();
+            // The fingerprints that the two builds wrote agree with each other.
+            let out = fine_grain(p, "build -v")
+                .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+                .build_command()
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8(out.stderr).unwrap();
+            assert!(
+                out.status.success() && !stderr.contains("Running `"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+/// A build script for a registry crate that, in the build that sets `GATE`, waits until the file
+/// that `GATE` names exists, and creates `<GATE>.ready` first. Other builds pass right through.
+const GATE_BUILD_RS: &str = r#"
+    fn main() {
+        if let Ok(path) = std::env::var("GATE") {
+            std::fs::write(format!("{path}.ready"), "").unwrap();
+            while !std::path::Path::new(&path).exists() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+"#;
+
+fn wait_for(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + cargo_test_support::slow_cpu_multiplier(60);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} did not appear",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cargo_test]
+fn a_build_reuses_units_that_another_build_compiles_while_it_waits() {
+    // The second build starts while the first runs a build script. It plans that unit and the
+    // ones that depend on it as dirty, waits for the first build to finish the script, and uses
+    // its output. Of the units left, each build compiles the ones that it gets to first, and the
+    // other one uses them: each unit is compiled once.
+    Package::new("gate", "1.0.0")
+        .file("build.rs", GATE_BUILD_RS)
+        .file("src/lib.rs", "pub fn gate() {}")
+        .publish();
+    Package::new("after", "1.0.0")
+        .dep("gate", "1.0")
+        .file("src/lib.rs", "pub fn after() { gate::gate() }")
+        .publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                after = "1.0"
+            "#,
+        )
+        .file("src/lib.rs", "pub fn foo() { after::after() }")
+        .build();
+    let release = paths::root().join("release");
+
+    let first_log = paths::root().join("first.log");
+    let mut first = fine_grain(&p, "check -v")
+        .env("GATE", &release)
+        .build_command();
+    first
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&first_log).unwrap());
+    let mut first = first.spawn().unwrap();
+    wait_for(&paths::root().join("release.ready"));
+
+    let second_log = paths::root().join("second.log");
+    let mut second = fine_grain(&p, "check -v").build_command();
+    second
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&second_log).unwrap());
+    let mut second = second.spawn().unwrap();
+    // Let the second build reach the unit's lock before the first one goes on.
+    let deadline = std::time::Instant::now() + cargo_test_support::slow_cpu_multiplier(60);
+    while !std::fs::read_to_string(&second_log)
+        .unwrap()
+        .contains("Blocking waiting for file lock on gate")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second build did not wait for the first:\n{}",
+            std::fs::read_to_string(&second_log).unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::fs::write(&release, "").unwrap();
+
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+    let stderr = [&first_log, &second_log].map(|log| std::fs::read_to_string(log).unwrap());
+    let runs = stderr.iter().flat_map(|s| rustc_runs(s)).collect();
+    assert_eq!(
+        sorted(runs),
+        sorted(
+            ["after", "build_script_build", "foo", "gate"]
+                .map(String::from)
+                .to_vec()
+        ),
+        "each unit is compiled once:\n{}",
+        stderr.join("\n----\n")
+    );
+    assert!(
+        !stderr[1].contains("out/build_script_build`"),
+        "the second build does not run the build script:\n{}",
+        stderr[1]
+    );
+}
+
+#[cargo_test]
+fn a_build_waiting_for_a_lock_gives_back_its_jobserver_token() {
+    // With one job, the second build waits for a unit that the first build compiles, and still
+    // builds its other units meanwhile (cargo#6747). A proc macro holds up the first build's rustc.
+    Package::new("gatemac", "1.0.0")
+        .proc_macro(true)
+        .file(
+            "src/lib.rs",
+            &format!(
+                "extern crate proc_macro;\n\
+                 #[proc_macro]\n\
+                 pub fn gate(_: proc_macro::TokenStream) -> proc_macro::TokenStream {{\n{}\n\
+                 \"\".parse().unwrap()\n}}",
+                GATE_BUILD_RS
+                    .replace("fn main() {", "")
+                    .trim_end()
+                    .trim_end_matches('}')
+            ),
+        )
+        .publish();
+    Package::new("gate", "1.0.0")
+        .dep("gatemac", "1.0")
+        .file("src/lib.rs", "gatemac::gate!();\npub fn gate() {}")
+        .publish();
+    Package::new("other", "1.0.0")
+        .file("src/lib.rs", "pub fn other() {}")
+        .publish();
+    let manifest = |name: &str, deps: &str| {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"
+        )
+    };
+    let first = project()
+        .at("first")
+        .file("Cargo.toml", &manifest("first", "gate = \"1.0\""))
+        .file("src/lib.rs", "")
+        .build();
+    let second = project()
+        .at("second")
+        .file(
+            "Cargo.toml",
+            &manifest("second", "gate = \"1.0\"\nother = \"1.0\""),
+        )
+        .file("src/lib.rs", "")
+        .build();
+    let build_dir = paths::root().join("shared-build");
+    let release = paths::root().join("release");
+
+    let mut a = fine_grain(&first, "check")
+        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+        .env("GATE", &release)
+        .build_command();
+    a.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut a = a.spawn().unwrap();
+    wait_for(&paths::root().join("release.ready"));
+
+    let mut b = fine_grain(&second, "check -j1")
+        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+        .build_command();
+    b.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut b = b.spawn().unwrap();
+    // `other` gets built while the second build waits for `gate`.
+    let other = build_dir.join("debug/build/other");
+    let deadline = std::time::Instant::now() + cargo_test_support::slow_cpu_multiplier(60);
+    while !other.exists()
+        || !std::fs::read_dir(&other).unwrap().any(|unit| {
+            let out = unit.unwrap().path().join("out");
+            out.exists()
+                && std::fs::read_dir(out)
+                    .unwrap()
+                    .any(|f| f.unwrap().path().extension().is_some_and(|e| e == "rmeta"))
+        })
+    {
+        if std::time::Instant::now() > deadline {
+            std::fs::write(&release, "").unwrap();
+            let _ = (a.wait(), b.wait());
+            panic!("the waiting build did not build its other units");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::fs::write(&release, "").unwrap();
+    assert!(a.wait().unwrap().success());
+    assert!(b.wait().unwrap().success());
+}
+
+#[cargo_test]
+fn a_build_waits_for_a_unit_that_another_build_uses_with_other_settings() {
+    // `RUSTFLAGS` with a path remap stay out of the unit's id: both builds share the unit
+    // directory of `shared-dep`, with different fingerprints. The second build waits until the
+    // first is done with it, then builds it.
+    Package::new("shared-dep", "1.0.0")
+        .file("src/lib.rs", "pub fn shared() {}")
+        .publish();
+    let manifest = |name: &str| {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared-dep = \"1.0\"\n"
+        )
+    };
+    // `first`'s own build script holds the build, with shared-dep locked shared as fresh.
+    let first = project()
+        .at("first")
+        .file("Cargo.toml", &manifest("first"))
+        .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
+        .file(
+            "build.rs",
+            &GATE_BUILD_RS.replace(
+                "fn main() {",
+                "fn main() {\n println!(\"cargo::rerun-if-env-changed=GATE\");",
+            ),
+        )
+        .build();
+    let second = project()
+        .at("second")
+        .file("Cargo.toml", &manifest("second"))
+        .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
+        .build();
+    let build_dir = paths::root().join("shared-build");
+    let first_flags = "--remap-path-prefix=/c=/d";
+    fine_grain(&first, "check")
+        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+        .env("RUSTFLAGS", first_flags)
+        .run();
+
+    let release = paths::root().join("release");
+    let mut a = fine_grain(&first, "check")
+        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+        .env("RUSTFLAGS", first_flags)
+        .env("GATE", &release)
+        .build_command();
+    a.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut a = a.spawn().unwrap();
+    wait_for(&paths::root().join("release.ready"));
+
+    let second_log = paths::root().join("second.log");
+    let mut b = fine_grain(&second, "check -v")
+        .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+        .env("RUSTFLAGS", "--remap-path-prefix=/a=/b")
+        .build_command();
+    b.stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&second_log).unwrap());
+    let mut b = b.spawn().unwrap();
+    let deadline = std::time::Instant::now() + cargo_test_support::slow_cpu_multiplier(60);
+    while !std::fs::read_to_string(&second_log)
+        .unwrap()
+        .contains("Blocking waiting for file lock on shared-dep")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second build did not wait for the first:\n{}",
+            std::fs::read_to_string(&second_log).unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // It keeps waiting while the first build holds the unit.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(b.try_wait().unwrap().is_none());
+    std::fs::write(&release, "").unwrap();
+    assert!(a.wait().unwrap().success());
+    assert!(b.wait().unwrap().success());
+    let stderr = std::fs::read_to_string(&second_log).unwrap();
+    assert_eq!(
+        sorted(rustc_runs(&stderr)),
+        sorted(vec!["second".to_string(), "shared_dep".to_string()]),
+        "{stderr}"
+    );
 }
 
 fn parse_workspace_manifest_path_hash(hash_dir: &PathBuf) -> PathBuf {

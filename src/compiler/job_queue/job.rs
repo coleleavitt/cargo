@@ -102,6 +102,12 @@ impl Job {
         self.work = prev.then(next);
     }
 
+    /// Replaces our unit of work with the one `f` makes from it.
+    pub fn wrap(&mut self, f: impl FnOnce(Work) -> Work) {
+        let prev = mem::replace(&mut self.work, Work::noop());
+        self.work = f(prev);
+    }
+
     /// Makes this job run `work` as a fresh job instead of its own work if `unchanged`
     /// returns `true` when the job is started.
     pub fn set_cutoff(&mut self, unchanged: impl FnOnce() -> bool + Send + 'static, work: Work) {

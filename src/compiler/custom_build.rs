@@ -278,8 +278,16 @@ impl LinkArgTarget {
 }
 
 /// Prepares a `Work` that executes the target as a custom build script.
+///
+/// `force` makes the job dirty. Along with the job, this returns the work of a fresh job when the
+/// job is dirty, for `-Zfine-grain-locking` to use when another cargo has run the script in the
+/// meantime.
 #[tracing::instrument(skip_all)]
-pub fn prepare(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Job> {
+pub fn prepare(
+    build_runner: &mut BuildRunner<'_, '_>,
+    unit: &Unit,
+    force: bool,
+) -> CargoResult<(Job, Option<Work>)> {
     let metadata = build_runner.get_run_build_script_metadata(unit);
     if build_runner
         .build_script_outputs
@@ -288,9 +296,12 @@ pub fn prepare(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         .contains_key(metadata)
     {
         // The output is already set, thus the build script is overridden.
-        fingerprint::prepare_target(build_runner, unit, false)
+        Ok((
+            fingerprint::prepare_target(build_runner, unit, force)?,
+            None,
+        ))
     } else {
-        build_work(build_runner, unit)
+        build_work(build_runner, unit, force)
     }
 }
 
@@ -329,7 +340,11 @@ fn emit_build_output(
 /// * Create the output dir (`OUT_DIR`) for the build script output.
 /// * Determine if the build script needs a re-run.
 /// * Run the build script and store its output.
-fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Job> {
+fn build_work(
+    build_runner: &mut BuildRunner<'_, '_>,
+    unit: &Unit,
+    force: bool,
+) -> CargoResult<(Job, Option<Work>)> {
     assert!(unit.mode.is_run_custom_build());
     let bcx = &build_runner.bcx;
     let dependencies = build_runner.unit_deps(unit);
@@ -505,6 +520,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     let build_script_outputs = Arc::clone(&build_runner.build_script_outputs);
     let id = unit.pkg.package_id();
     let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
+    let root_output = run_files.root_output.clone();
     let host_target_root = build_runner.files().host_dest().map(|v| v.to_path_buf());
     let all = (
         id,
@@ -718,40 +734,54 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     // Now that we've prepared our work-to-do, we need to prepare the fresh work
     // itself to run when we actually end up just discarding what we calculated
     // above.
-    let fresh = Work::new(move |state| {
-        let (id, library_name, pkg_descr, build_script_outputs, output_file, script_out_dir) = all;
-        let output = match prev_output {
-            Some(output) => output,
-            None => BuildOutput::parse_file(
-                &output_file,
-                library_name,
-                &pkg_descr,
-                &prev_script_out_dir,
-                &script_out_dir,
-                nightly_features_allowed,
-                &targets_fresh,
-                &msrv_fresh,
-            )?,
-        };
+    let fresh = move |prev: Option<(BuildOutput, PathBuf)>| {
+        let (id, library_name, pkg_descr, build_script_outputs, output_file, script_out_dir) =
+            all.clone();
+        let (targets, msrv) = (targets_fresh.clone(), msrv_fresh.clone());
+        let root_output = root_output.clone();
+        Work::new(move |state| {
+            let output = match prev {
+                Some((output, _)) => output,
+                // The previous output, as another cargo may have just written it.
+                None => {
+                    let prev_script_out_dir = paths::read_bytes(&root_output)
+                        .and_then(|bytes| paths::bytes2path(&bytes))
+                        .unwrap_or_else(|_| script_out_dir.clone());
+                    BuildOutput::parse_file(
+                        &output_file,
+                        library_name,
+                        &pkg_descr,
+                        &prev_script_out_dir,
+                        &script_out_dir,
+                        nightly_features_allowed,
+                        &targets,
+                        &msrv,
+                    )?
+                }
+            };
 
-        if json_messages {
-            emit_build_output(state, &output, script_out_dir.as_path(), id)?;
-        }
+            if json_messages {
+                emit_build_output(state, &output, script_out_dir.as_path(), id)?;
+            }
 
-        build_script_outputs
-            .lock()
-            .unwrap()
-            .insert(id, metadata_hash, output);
-        Ok(())
-    });
+            build_script_outputs
+                .lock()
+                .unwrap()
+                .insert(id, metadata_hash, output);
+            Ok(())
+        })
+    };
 
-    let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
+    let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
     if job.freshness().is_dirty() {
         job.before(dirty);
+        Ok((job, Some(fresh(None))))
     } else {
-        job.before(fresh);
+        job.before(fresh(
+            prev_output.map(|output| (output, prev_script_out_dir)),
+        ));
+        Ok((job, None))
     }
-    Ok(job)
 }
 
 /// When a build script run fails, store only log messages, and nuke other
@@ -1371,14 +1401,17 @@ pub fn build_map(build_runner: &mut BuildRunner<'_, '_>) -> CargoResult<()> {
             scripts.to_link.push((pkg, metadata));
         }
     }
+}
 
-    /// Load any dependency declarations from a previous build script run.
-    fn parse_previous_explicit_deps(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) {
-        let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
-        let (prev_output, _) = prev_build_output(build_runner, unit);
-        let deps = BuildDeps::new(&run_files.stdout, prev_output.as_ref());
-        build_runner.build_explicit_deps.insert(unit.clone(), deps);
-    }
+/// Load any dependency declarations from a previous build script run.
+///
+/// With `-Zfine-grain-locking`, `fingerprint::fresh_after_wait` loads them again during the build:
+/// another cargo may have run the script since.
+pub fn parse_previous_explicit_deps(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) {
+    let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
+    let (prev_output, _) = prev_build_output(build_runner, unit);
+    let deps = BuildDeps::new(&run_files.stdout, prev_output.as_ref());
+    build_runner.build_explicit_deps.insert(unit.clone(), deps);
 }
 
 /// Returns the previous parsed `BuildOutput`, if any, from a previous

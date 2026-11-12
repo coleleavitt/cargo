@@ -364,32 +364,6 @@ fn host_supports_split_debuginfo(split_debuginfo: &str) -> bool {
         .any(|supported| supported == split_debuginfo)
 }
 
-fn check_command(command_path: &Path, args: &[&str]) -> bool {
-    let mut command = Command::new(command_path);
-    let command_name = command.get_program().to_str().unwrap().to_owned();
-    command.args(args);
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(e) => {
-            if is_ci() {
-                panic!("expected command `{command_name}` to be somewhere in PATH: {e}",);
-            }
-            return false;
-        }
-    };
-    if !output.status.success() {
-        panic!(
-            "expected command `{command_name}` to be runnable, got error {}:\n\
-            stderr:{}\n\
-            stdout:{}\n",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        );
-    }
-    true
-}
-
 fn has_command(command: &str) -> bool {
     use std::env::consts::EXE_EXTENSION;
     // ALLOWED: For testing cargo itself only.
@@ -442,14 +416,6 @@ fn has_rustup_stable() -> bool {
         .args(["run", "stable", "cargo", "--version"])
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-/// Whether or not this running in a Continuous Integration environment.
-fn is_ci() -> bool {
-    // Consider using `tracked_env` instead of option_env! when it is stabilized.
-    // `tracked_env` will handle changes, but not require rebuilding the macro
-    // itself like option_env does.
-    option_env!("CI").is_some() || option_env!("TF_BUILD").is_some()
 }
 
 /// Whether to enforce external tools (`requires=<tool>`) availability.
