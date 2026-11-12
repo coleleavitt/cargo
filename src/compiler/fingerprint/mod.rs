@@ -385,7 +385,7 @@ use cargo_util::collections::HashMap;
 use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
 use std::hash::{self, Hash, Hasher};
@@ -397,7 +397,7 @@ use std::time::SystemTime;
 
 use anyhow::Context as _;
 use anyhow::format_err;
-use cargo_util::paths;
+use cargo_util::{ProcessBuilder, paths};
 use filetime::FileTime;
 use serde::de;
 use serde::ser;
@@ -631,10 +631,14 @@ pub fn prepare_target(
 
 /// The public API hashes of a unit's dependencies that are reached through public-API edges
 /// (`-Zpublic-api-hash`), and the file recording the hashes the unit was last compiled against.
+/// Each hash is "<public API hash>" or "<public API hash> <public span hash>".
 #[derive(Clone)]
 struct PublicApiDeps {
     record: PathBuf,
     deps: Vec<(InternedString, PathBuf)>,
+    /// rustc and the `.rdr-spans` file rustc writes next to the unit's rmeta, listing the
+    /// upstream items whose code or positions the unit copied.
+    span_reuse_check: Option<(ProcessBuilder, PathBuf)>,
 }
 
 impl PublicApiDeps {
@@ -648,11 +652,22 @@ impl PublicApiDeps {
             .iter()
             .filter_map(|dep| Some((dep.name, dep.public_api_hash_path.clone()?)))
             .collect();
+        let span_reuse_check = fingerprint
+            .outputs
+            .iter()
+            .find(|output| output.extension() == Some(OsStr::new("rmeta")))
+            .map(|rmeta| {
+                (
+                    build_runner.bcx.rustc().process_no_wrapper(),
+                    rmeta.with_extension("rdr-spans"),
+                )
+            });
         (!deps.is_empty()).then(|| PublicApiDeps {
             record: build_runner
                 .files()
                 .fingerprint_file_path(unit, "dep-public-api-hashes-"),
             deps,
+            span_reuse_check,
         })
     }
 
@@ -665,7 +680,9 @@ impl PublicApiDeps {
             .collect()
     }
 
-    /// Whether every dependency has a public API hash and it equals the recorded one.
+    /// Whether the unit's outputs are still what compiling it against its dependencies' current
+    /// metadata would produce: every public API hash equals the recorded one, and every public
+    /// span hash too, unless rustc confirms that none of the upstream items the unit copied moved.
     fn unchanged(&self) -> bool {
         let Ok(recorded) = paths::read(&self.record) else {
             return false;
@@ -675,12 +692,53 @@ impl PublicApiDeps {
             return false;
         };
         let current = self.current();
-        let unchanged = current.len() == self.deps.len() && current == recorded;
+        if current.len() != self.deps.len() {
+            return false;
+        }
+        let mut spans_changed = false;
+        for (name, now) in &current {
+            let Some(before) = recorded.get(name) else {
+                return false;
+            };
+            if now == before {
+                continue;
+            }
+            let api = |hashes: &str| hashes.split_once(' ').map(|(api, _span)| api.to_owned());
+            match (api(now), api(before)) {
+                (Some(now), Some(before)) if now == before => spans_changed = true,
+                _ => return false,
+            }
+        }
+        let unchanged = !spans_changed || self.spans_reusable();
         debug!(
-            "public API hashes of dependencies for {:?}: unchanged={unchanged}",
+            "public API hashes of dependencies for {:?}: spans_changed={spans_changed} \
+             unchanged={unchanged}",
             self.record
         );
         unchanged
+    }
+
+    /// Asks rustc (`-Zcheck-span-reuse`) whether the upstream items recorded in the unit's
+    /// `.rdr-spans` file kept their positions in the rebuilt dependencies.
+    fn spans_reusable(&self) -> bool {
+        let Some((rustc, spans)) = &self.span_reuse_check else {
+            return false;
+        };
+        if !spans.exists() {
+            return false;
+        }
+        let mut cmd = rustc.clone();
+        cmd.arg("-Zcheck-span-reuse").arg(spans);
+        let output = match cmd.output() {
+            Ok(output) => output,
+            Err(e) => {
+                debug!("{cmd} failed: {e:?}");
+                return false;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        debug!("{cmd}: {}", stdout.trim());
+        output.status.success() && stdout.trim() == "span-reuse: yes"
     }
 
     fn write(&self) -> CargoResult<()> {
