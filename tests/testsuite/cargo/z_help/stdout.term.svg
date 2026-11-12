@@ -1,4 +1,4 @@
-<svg width="1255px" height="1028px" xmlns="http://www.w3.org/2000/svg">
+<svg width="1255px" height="1010px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -66,29 +66,29 @@
 </tspan>
     <tspan x="10px" y="460px"><tspan>    -Z host-config                 Enable the `[host]` section in the .cargo/config.toml file</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>    -Z isolate-workspace-units     Hash the absolute workspace root into the unit hash of workspace path packages</tspan>
+    <tspan x="10px" y="478px"><tspan>    -Z json-target-spec            Enable `.json` target spec files</tspan>
 </tspan>
-    <tspan x="10px" y="496px"><tspan>    -Z json-target-spec            Enable `.json` target spec files</tspan>
+    <tspan x="10px" y="496px"><tspan>    -Z mem-stats                   Report peak memory usage per build unit in --timings output</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan>    -Z mem-stats                   Report peak memory usage per build unit in --timings output</tspan>
+    <tspan x="10px" y="514px"><tspan>    -Z minimal-versions            Resolve minimal dependency versions instead of maximum</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>    -Z minimal-versions            Resolve minimal dependency versions instead of maximum</tspan>
+    <tspan x="10px" y="532px"><tspan>    -Z msrv-policy                 Enable rust-version aware policy within cargo</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>    -Z msrv-policy                 Enable rust-version aware policy within cargo</tspan>
+    <tspan x="10px" y="550px"><tspan>    -Z mtime-on-use                Configure Cargo to update the mtime of used files</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>    -Z mtime-on-use                Configure Cargo to update the mtime of used files</tspan>
+    <tspan x="10px" y="568px"><tspan>    -Z no-index-update             Do not update the registry index even if the cache is outdated</tspan>
 </tspan>
-    <tspan x="10px" y="586px"><tspan>    -Z no-index-update             Do not update the registry index even if the cache is outdated</tspan>
+    <tspan x="10px" y="586px"><tspan>    -Z panic-abort-tests           Enable support to run tests with -Cpanic=abort</tspan>
 </tspan>
-    <tspan x="10px" y="604px"><tspan>    -Z panic-abort-tests           Enable support to run tests with -Cpanic=abort</tspan>
+    <tspan x="10px" y="604px"><tspan>    -Z panic-immediate-abort       Enable setting `panic = "immediate-abort"` in profiles</tspan>
 </tspan>
-    <tspan x="10px" y="622px"><tspan>    -Z panic-immediate-abort       Enable setting `panic = "immediate-abort"` in profiles</tspan>
+    <tspan x="10px" y="622px"><tspan>    -Z prerelease                  Allow selecting pre-release versions with `update --precise`</tspan>
 </tspan>
-    <tspan x="10px" y="640px"><tspan>    -Z prerelease                  Allow selecting pre-release versions with `update --precise`</tspan>
+    <tspan x="10px" y="640px"><tspan>    -Z profile-hint-mostly-unused  Enable the `hint-mostly-unused` setting in profiles to mark a crate as mostly unused.</tspan>
 </tspan>
-    <tspan x="10px" y="658px"><tspan>    -Z profile-hint-mostly-unused  Enable the `hint-mostly-unused` setting in profiles to mark a crate as mostly unused.</tspan>
+    <tspan x="10px" y="658px"><tspan>    -Z profile-rustflags           Enable the `rustflags` option in profiles in .cargo/config.toml file</tspan>
 </tspan>
-    <tspan x="10px" y="676px"><tspan>    -Z profile-rustflags           Enable the `rustflags` option in profiles in .cargo/config.toml file</tspan>
+    <tspan x="10px" y="676px"><tspan>    -Z public-api-hash             Do not rebuild library dependents when a dependency's public API hash is unchanged</tspan>
 </tspan>
     <tspan x="10px" y="694px"><tspan>    -Z public-dependency           Respect a dependency's `public` field in Cargo.toml to control public/private dependencies</tspan>
 </tspan>
@@ -114,19 +114,17 @@
 </tspan>
     <tspan x="10px" y="892px"><tspan>    -Z target-applies-to-host      Enable the `target-applies-to-host` key in the .cargo/config.toml file</tspan>
 </tspan>
-    <tspan x="10px" y="910px"><tspan>    -Z unit-cache                  Share compiled units of registry and git packages between build directories</tspan>
+    <tspan x="10px" y="910px"><tspan>    -Z unstable-options            Allow the usage of unstable options</tspan>
 </tspan>
-    <tspan x="10px" y="928px"><tspan>    -Z unstable-options            Allow the usage of unstable options</tspan>
+    <tspan x="10px" y="928px">
 </tspan>
-    <tspan x="10px" y="946px">
+    <tspan x="10px" y="946px"><tspan>Run with `cargo -Z [FLAG] [COMMAND]`</tspan>
 </tspan>
-    <tspan x="10px" y="964px"><tspan>Run with `cargo -Z [FLAG] [COMMAND]`</tspan>
+    <tspan x="10px" y="964px">
 </tspan>
-    <tspan x="10px" y="982px">
+    <tspan x="10px" y="982px"><tspan>See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html for more information about these flags.</tspan>
 </tspan>
-    <tspan x="10px" y="1000px"><tspan>See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html for more information about these flags.</tspan>
-</tspan>
-    <tspan x="10px" y="1018px">
+    <tspan x="10px" y="1000px">
 </tspan>
   </text>
 

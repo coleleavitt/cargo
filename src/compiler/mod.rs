@@ -235,14 +235,7 @@ fn compile<'gctx>(
         } else {
             let force = exec.force_rebuild(unit) || force_rebuild;
             let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
-            job.before(if job.freshness().is_dirty() {
-                let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
-                    rustdoc(build_runner, unit)?
-                } else {
-                    rustc(build_runner, unit, exec)?
-                };
-                work.then(link_targets(build_runner, unit, false)?)
-            } else {
+            let fresh_work = |build_runner: &mut BuildRunner<'_, '_>| -> CargoResult<Work> {
                 let output_options = OutputOptions::for_fresh(build_runner, unit);
                 let manifest = ManifestErrorContext::new(build_runner, unit);
                 let work = replay_output_cache(
@@ -253,8 +246,21 @@ fn compile<'gctx>(
                     output_options,
                 );
                 // Need to link targets on both the dirty and fresh.
-                work.then(link_targets(build_runner, unit, true)?)
+                Ok(work.then(link_targets(build_runner, unit, true)?))
+            };
+            job.before(if job.freshness().is_dirty() {
+                let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+                    rustdoc(build_runner, unit)?
+                } else {
+                    rustc(build_runner, unit, exec)?
+                };
+                work.then(link_targets(build_runner, unit, false)?)
+            } else {
+                fresh_work(build_runner)?
             });
+            if job.has_cutoff() {
+                job.cutoff_before(fresh_work(build_runner)?);
+            }
 
             // If -Zfine-grain-locking is enabled, we wrap the job with an upgrade to exclusive
             // lock before starting, then downgrade to a shared lock after the job is finished.
@@ -406,6 +412,7 @@ fn rustc(
     }
     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
     return Ok(Work::new(move |state| {
+        output_options.remove_previous();
         if build_dir_new_layout {
             // Remove all files from the out dir to avoid overwriting a file that is hardlinked
             // outside of build-dir.
@@ -1121,6 +1128,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     }
 
     Ok(Work::new(move |state| {
+        output_options.remove_previous();
         add_custom_flags(
             &mut rustdoc,
             &build_script_outputs.lock().unwrap(),
@@ -1394,6 +1402,10 @@ fn build_base_args(
         } else {
             cmd.arg("--emit=dep-info,link");
         }
+    }
+
+    if build_runner.bcx.target_data.info(unit.kind).public_api_hash {
+        cmd.arg("-Zpublic-api-hash");
     }
 
     let prefer_dynamic = (unit.target.for_host() && !unit.target.is_custom_build())
@@ -2044,13 +2056,14 @@ struct OutputOptions {
     warnings_seen: usize,
     /// Tracks the number of errors we've seen so far.
     errors_seen: usize,
+    /// With `-Zpublic-api-hash`, where to store the public API hash rustc reports for the
+    /// metadata of this unit. See [`fingerprint::public_api_hash_path`].
+    public_api_hash_path: Option<PathBuf>,
 }
 
 impl OutputOptions {
     fn for_dirty(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OutputOptions {
         let path = build_runner.files().message_cache_path(unit);
-        // Remove old cache, ignore ENOENT, which is the common case.
-        drop(fs::remove_file(&path));
         let cache_cell = Some((path, OnceCell::new()));
 
         let show_diagnostics = true;
@@ -2063,6 +2076,20 @@ impl OutputOptions {
             show_diagnostics,
             warnings_seen: 0,
             errors_seen: 0,
+            public_api_hash_path: fingerprint::public_api_hash_path(build_runner, unit),
+        }
+    }
+
+    /// Removes what the previous compilation of the unit left behind. This happens when the
+    /// job starts, not when it is prepared, because with `-Zpublic-api-hash` a dirty job may
+    /// still turn fresh and replay the cached messages (see `Job::resolve_cutoff`).
+    fn remove_previous(&self) {
+        // Ignore ENOENT, which is the common case.
+        if let Some((path, _)) = &self.cache_cell {
+            drop(fs::remove_file(path));
+        }
+        if let Some(path) = &self.public_api_hash_path {
+            drop(fs::remove_file(path));
         }
     }
 
@@ -2081,6 +2108,7 @@ impl OutputOptions {
             show_diagnostics,
             warnings_seen: 0,
             errors_seen: 0,
+            public_api_hash_path: None,
         }
     }
 }
@@ -2384,12 +2412,21 @@ fn on_stderr_line_inner(
     struct ArtifactNotification<'a> {
         #[serde(borrow)]
         artifact: Cow<'a, str>,
+        /// Present with `-Zpublic-api-hash` on the metadata notification.
+        public_api_hash: Option<String>,
     }
 
     if let Ok(artifact) = serde_json::from_str::<ArtifactNotification<'_>>(compiler_message.get()) {
         trace!("found directive from rustc: `{}`", artifact.artifact);
         if artifact.artifact.ends_with(".rmeta") {
             debug!("looks like metadata finished early!");
+            // Written before dependents are unblocked, as they compare it in
+            // `Job::resolve_cutoff`.
+            if let (Some(path), Some(hash)) =
+                (&options.public_api_hash_path, &artifact.public_api_hash)
+            {
+                paths::write(path, hash)?;
+            }
             state.rmeta_produced();
         }
         return Ok(false);

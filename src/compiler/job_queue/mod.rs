@@ -592,6 +592,7 @@ impl<'gctx> DrainState<'gctx> {
         // sooner.
         while self.has_extra_tokens() && !self.pending_queue.is_empty() {
             let (unit, job, _) = self.pending_queue.pop().unwrap();
+            let job = job.resolve_cutoff();
             *self.counts.get_mut(&unit.pkg.package_id()).unwrap() -= 1;
             // Print out some nice progress information.
             // NOTE: An error here will drop the job without starting it.

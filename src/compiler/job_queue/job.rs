@@ -12,6 +12,14 @@ use crate::util::CargoResult;
 pub struct Job {
     work: Work,
     fresh: Freshness,
+    cutoff: Option<Cutoff>,
+}
+
+/// Work that replaces a dirty job's own work when `unchanged` returns `true` at the time the
+/// job is started, after its dependencies have finished (early cutoff, `-Zpublic-api-hash`).
+struct Cutoff {
+    unchanged: Box<dyn FnOnce() -> bool + Send>,
+    work: Work,
 }
 
 /// The basic unit of work.
@@ -56,6 +64,7 @@ impl Job {
         Job {
             work: Work::noop(),
             fresh: Freshness::Fresh,
+            cutoff: None,
         }
     }
 
@@ -64,6 +73,7 @@ impl Job {
         Job {
             work,
             fresh: Freshness::Dirty(dirty_reason),
+            cutoff: None,
         }
     }
 
@@ -90,6 +100,42 @@ impl Job {
     pub fn after(&mut self, next: Work) {
         let prev = mem::replace(&mut self.work, Work::noop());
         self.work = prev.then(next);
+    }
+
+    /// Makes this job run `work` as a fresh job instead of its own work if `unchanged`
+    /// returns `true` when the job is started.
+    pub fn set_cutoff(&mut self, unchanged: impl FnOnce() -> bool + Send + 'static, work: Work) {
+        self.cutoff = Some(Cutoff {
+            unchanged: Box::new(unchanged),
+            work,
+        });
+    }
+
+    pub fn has_cutoff(&self) -> bool {
+        self.cutoff.is_some()
+    }
+
+    /// Chains the given work in front of the cutoff work, if any.
+    pub fn cutoff_before(&mut self, next: Work) {
+        if let Some(cutoff) = &mut self.cutoff {
+            let prev = mem::replace(&mut cutoff.work, Work::noop());
+            cutoff.work = next.then(prev);
+        }
+    }
+
+    /// Decides the cutoff, if any. Call only once the job's dependencies have finished.
+    pub fn resolve_cutoff(mut self) -> Job {
+        let Some(cutoff) = self.cutoff.take() else {
+            return self;
+        };
+        if !(cutoff.unchanged)() {
+            return self;
+        }
+        Job {
+            work: cutoff.work,
+            fresh: Freshness::Fresh,
+            cutoff: None,
+        }
     }
 }
 
