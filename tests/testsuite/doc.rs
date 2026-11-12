@@ -2976,7 +2976,7 @@ fn rebuild_tracks_target_src_outside_package_root() {
         .arg("-Zrustdoc-depinfo")
         .masquerade_as_nightly_cargo(&["rustdoc-depinfo"])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.0 ([ROOT]/parent/foo): the file `../lib.rs` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
+[DIRTY] foo v0.0.0 ([ROOT]/parent/foo): file size changed (20 != 19) for `../lib.rs`
 [DOCUMENTING] foo v0.0.0 ([ROOT]/parent/foo)
 [RUNNING] `rustdoc [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3017,7 +3017,7 @@ fn rebuild_tracks_include_str() {
         .arg("-Zrustdoc-depinfo")
         .masquerade_as_nightly_cargo(&["rustdoc-depinfo"])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.5.0 ([ROOT]/parent/foo): the file `src/../../README` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
+[DIRTY] foo v0.5.0 ([ROOT]/parent/foo): file size changed (16 != 15) for `src/../../README`
 [DOCUMENTING] foo v0.5.0 ([ROOT]/parent/foo)
 [RUNNING] `rustdoc [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3058,7 +3058,7 @@ fn rebuild_tracks_path_attr() {
         .arg("-Zrustdoc-depinfo")
         .masquerade_as_nightly_cargo(&["rustdoc-depinfo"])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.5.0 ([ROOT]/parent/foo): the file `src/../../bar.rs` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
+[DIRTY] foo v0.5.0 ([ROOT]/parent/foo): file size changed (20 != 19) for `src/../../bar.rs`
 [DOCUMENTING] foo v0.5.0 ([ROOT]/parent/foo)
 [RUNNING] `rustdoc [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3787,7 +3787,7 @@ fn mergeable_info_rebuild_with_depinfo() {
         .masquerade_as_nightly_cargo(&["rustdoc-mergeable-info", "-Zrustdoc-depinfo"])
         .with_stderr_data(
             str![[r#"
-[DIRTY] foo v0.0.0 ([ROOT]/foo): the file `src/lib.rs` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
+[DIRTY] foo v0.0.0 ([ROOT]/foo): file size changed (15 != 16) for `src/lib.rs`
 [DOCUMENTING] foo v0.0.0 ([ROOT]/foo)
 [RUNNING] `rustdoc [..]--crate-name foo [..]--emit=html-non-static-files,dep-info=[..] --write-doc-meta-dir=[ROOT]/foo/target/debug/build/foo/[HASH]/out [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s

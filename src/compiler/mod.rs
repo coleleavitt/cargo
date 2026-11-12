@@ -209,21 +209,14 @@ fn compile<'gctx>(
         None
     };
 
-    match build_runner
-        .bcx
-        .gctx
-        .build_config()?
-        .fingerprint
-        .unwrap_or_default()
+    if build_runner.bcx.gctx.build_config()?.fingerprint == Some(FingerprintMethod::Content)
+        && fingerprint::fingerprint_method(build_runner.bcx)? == FingerprintMethod::Mtime
     {
-        FingerprintMethod::Content => {
-            if !build_runner.bcx.gctx.cli_unstable().checksum_freshness {
-                build_runner.bcx.gctx.shell().warn(
-                    r#"ignoring `build.fingerprint = "content"` without `-Zchecksum-freshness`"#,
-                )?;
-            }
-        }
-        FingerprintMethod::Mtime => {}
+        build_runner
+            .bcx
+            .gctx
+            .shell()
+            .warn(r#"ignoring `build.fingerprint = "content"` without `-Zchecksum-freshness`"#)?;
     }
 
     // If we are in `--compile-time-deps` and the given unit is not a compile time
@@ -892,19 +885,8 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
     if gctx.cli_unstable().binary_dep_depinfo {
         base.arg("-Z").arg("binary-dep-depinfo");
     }
-    if build_runner.bcx.gctx.cli_unstable().checksum_freshness {
-        match build_runner
-            .bcx
-            .gctx
-            .build_config()?
-            .fingerprint
-            .unwrap_or_default()
-        {
-            FingerprintMethod::Content => {
-                base.arg("-Z").arg("checksum-hash-algorithm=blake3");
-            }
-            FingerprintMethod::Mtime => {}
-        }
+    if fingerprint::fingerprint_method(build_runner.bcx)? == FingerprintMethod::Content {
+        base.arg("-Z").arg("checksum-hash-algorithm=blake3");
     }
 
     if is_primary {
@@ -993,19 +975,8 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         arg.push(rustdoc_dep_info_loc(build_runner, unit));
         rustdoc.arg(arg);
 
-        if build_runner.bcx.gctx.cli_unstable().checksum_freshness {
-            match build_runner
-                .bcx
-                .gctx
-                .build_config()?
-                .fingerprint
-                .unwrap_or_default()
-            {
-                FingerprintMethod::Content => {
-                    rustdoc.arg("-Z").arg("checksum-hash-algorithm=blake3");
-                }
-                FingerprintMethod::Mtime => {}
-            }
+        if fingerprint::fingerprint_method(build_runner.bcx)? == FingerprintMethod::Content {
+            rustdoc.arg("-Z").arg("checksum-hash-algorithm=blake3");
         }
     } else if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info && !wants_json_output {
         // toolchain resources are written at the end, at the same time as merging
