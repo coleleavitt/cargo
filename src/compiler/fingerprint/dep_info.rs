@@ -532,7 +532,7 @@ fn make_absolute_path(
 
 /// Some algorithms are here to ensure compatibility with possible rustc outputs.
 /// The presence of an algorithm here is not a suggestion that it's fit for use.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ChecksumAlgo {
     Sha256,
     Blake3,
@@ -567,7 +567,7 @@ impl fmt::Display for ChecksumAlgo {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Checksum {
     algo: ChecksumAlgo,
     /// If the algorithm uses fewer than 32 bytes, then the remaining bytes will be zero.

@@ -1234,31 +1234,22 @@ fn simulated_docker_deps_stay_cached() {
             .run();
     } else {
         println!("not already zero");
-        // It is not ideal that `foo` gets recompiled, but that is the current
-        // behavior. Currently mtimes are ignored for registry deps.
-        //
-        // Note that this behavior is due to the fact that `foo` has a build
-        // script in "old" mode where it doesn't print `rerun-if-*`. In this
-        // mode we use `Precalculated` to fingerprint a path dependency, where
-        // `Precalculated` is an opaque string which has the most recent mtime
-        // in it. It differs between builds because one has nsec=0 and the other
-        // likely has a nonzero nsec. Hence, the rebuild.
+        // `foo` has a build script in "old" mode where it doesn't print
+        // `rerun-if-*`. Its package fingerprint is a checksum of its files,
+        // so zeroed nanoseconds do not change it.
         p.cargo("build -v")
             .env("CARGO_BUILD_FINGERPRINT", "content")
             .arg("-Zchecksum-freshness")
             .masquerade_as_nightly_cargo(&["checksum-freshness"])
             .with_stderr_data(
                 str![[r#"
-[FRESH] regdep [..]
 [FRESH] pathdep [..]
+[FRESH] regdep [..]
 [FRESH] regdep_env [..]
-[DIRTY] foo v0.1.0 ([ROOT]/foo): the precalculated components changed
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[FRESH] regdep_rerun [..]
 [FRESH] regdep_old_style [..]
-[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
-[RUNNING] `rustc --crate-name foo [..]`
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[FRESH] regdep_rerun [..]
+[FRESH] foo [..]
+[FINISHED] [..]
 
 "#]]
                 .unordered(),
@@ -1611,7 +1602,7 @@ fn incremental_build_script_execution_got_new_mtime_and_cargo_check() {
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the file `touch-me` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
+[DIRTY] foo v0.0.1 ([ROOT]/foo): the file `touch-me` has changed (checksum didn't match, blake3=af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262 != blake3=3430d7227397151337cb4e3948708eca1d06e39126160000dfa2f0bd0576c86b)
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
 [RUNNING] `rustc --crate-name foo [..]`
@@ -1802,6 +1793,150 @@ one
         .masquerade_as_nightly_cargo(&["content fingerprint by default"])
         .with_stdout_data(str![[r#"
 two
+
+"#]])
+        .run();
+}
+
+/// Rewrites `path` and gives it an mtime one hour in the past, so only its
+/// content tells that it changed.
+fn change_file_keep_old_mtime(p: &cargo_test_support::Project, path: &str, content: &str) {
+    p.change_file(path, content);
+    let past = FileTime::from_unix_time(FileTime::now().unix_seconds() - 3600, 0);
+    filetime::set_file_mtime(p.root().join(path), past).unwrap();
+}
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn rerun_if_changed_uses_content() {
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            "build.rs",
+            r#"fn main() { println!("cargo::rerun-if-changed=data.txt"); }"#,
+        )
+        .file("data.txt", "one")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // New content with an older mtime is a change.
+    change_file_keep_old_mtime(&p, "data.txt", "two");
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[DIRTY] foo v0.0.1 ([ROOT]/foo): [..]data.txt[..]
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // A newer mtime with the same content is not a change.
+    p.root().move_into_the_future();
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn build_script_without_rerun_if_uses_content() {
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file("build.rs", "fn main() {}")
+        .file("data.txt", "one")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // New content with an older mtime is a change.
+    change_file_keep_old_mtime(&p, "data.txt", "two");
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[DIRTY] foo v0.0.1 ([ROOT]/foo): [..]
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // A newer mtime with the same content is not a change.
+    p.root().move_into_the_future();
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn rerun_if_changed_directory_uses_content() {
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            "build.rs",
+            r#"fn main() { println!("cargo::rerun-if-changed=data"); }"#,
+        )
+        .file("data/a.txt", "a")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // A new file, with it and its directory given old mtimes.
+    change_file_keep_old_mtime(&p, "data/b.txt", "b");
+    let past = FileTime::from_unix_time(FileTime::now().unix_seconds() - 3600, 0);
+    filetime::set_file_mtime(p.root().join("data"), past).unwrap();
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[DIRTY] foo v0.0.1 ([ROOT]/foo): [..]data[..]
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    p.root().move_into_the_future();
+    p.cargo("check -v")
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();

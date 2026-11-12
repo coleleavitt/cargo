@@ -422,6 +422,7 @@ use super::Work;
 use super::custom_build::BuildDeps;
 
 pub use self::dep_info::Checksum;
+use self::dep_info::ChecksumAlgo;
 pub use self::dep_info::parse_dep_info;
 pub use self::dep_info::parse_rustc_dep_info;
 pub use self::dep_info::translate_dep_info;
@@ -853,6 +854,15 @@ enum LocalFingerprint {
         paths: Vec<PathBuf>,
     },
 
+    /// [`LocalFingerprint::RerunIfChanged`] for [`FingerprintMethod::Content`]:
+    /// each path is stored with the size and checksum it had after the build
+    /// script ran, and these are part of the hash. `None` means the path could
+    /// not be read, which, as with mtimes, makes the build script always rerun.
+    RerunIfChangedContent {
+        output: PathBuf,
+        paths: Vec<(PathBuf, Option<(u64, Checksum)>)>,
+    },
+
     /// This represents a single `rerun-if-env-changed` annotation printed by a
     /// build script. The exact env var and value are hashed here. There's no
     /// filesystem dependence here, and if the values are changed the hash will
@@ -1019,6 +1029,21 @@ impl LocalFingerprint {
                 FingerprintMethod::Mtime,
             )),
 
+            // The checksums are compared through the hash. Only an unreadable
+            // path or a missing output is left to report here.
+            LocalFingerprint::RerunIfChangedContent { output, paths } => {
+                let output = build_root.join(output);
+                if !output.exists() {
+                    return Ok(Some(StaleItem::MissingFile { path: output }));
+                }
+                Ok(paths
+                    .iter()
+                    .find(|(_, checksum)| checksum.is_none())
+                    .map(|(path, _)| StaleItem::MissingFile {
+                        path: pkg_root.join(path),
+                    }))
+            }
+
             // These have no dependencies on the filesystem, and their values
             // are included natively in the `Fingerprint` hash so nothing
             // tocheck for here.
@@ -1032,6 +1057,7 @@ impl LocalFingerprint {
             LocalFingerprint::Precalculated(..) => "precalculated",
             LocalFingerprint::CheckDepInfo { .. } => "dep-info",
             LocalFingerprint::RerunIfChanged { .. } => "rerun-if-changed",
+            LocalFingerprint::RerunIfChangedContent { .. } => "rerun-if-changed-content",
             LocalFingerprint::RerunIfEnvChanged { .. } => "rerun-if-env-changed",
         }
     }
@@ -1178,6 +1204,49 @@ impl Fingerprint {
                             old: b_paths.clone(),
                             new: a_paths.clone(),
                         };
+                    }
+                }
+                (
+                    LocalFingerprint::RerunIfChangedContent {
+                        output: a_out,
+                        paths: a_paths,
+                    },
+                    LocalFingerprint::RerunIfChangedContent {
+                        output: b_out,
+                        paths: b_paths,
+                    },
+                ) => {
+                    if a_out != b_out {
+                        return DirtyReason::RerunIfChangedOutputFileChanged {
+                            old: b_out.clone(),
+                            new: a_out.clone(),
+                        };
+                    }
+                    if a_paths
+                        .iter()
+                        .map(|(p, _)| p)
+                        .ne(b_paths.iter().map(|(p, _)| p))
+                    {
+                        return DirtyReason::RerunIfChangedOutputPathsChanged {
+                            old: b_paths.iter().map(|(p, _)| p.clone()).collect(),
+                            new: a_paths.iter().map(|(p, _)| p.clone()).collect(),
+                        };
+                    }
+                    for ((path, new), (_, old)) in a_paths.iter().zip(b_paths) {
+                        let path = path.clone();
+                        let item = match (old, new) {
+                            _ if old == new => continue,
+                            (Some((_, stored_checksum)), Some((_, new_checksum))) => {
+                                StaleItem::ChangedChecksum {
+                                    source: path,
+                                    stored_checksum: *stored_checksum,
+                                    new_checksum: *new_checksum,
+                                }
+                            }
+                            (_, None) => StaleItem::MissingFile { path },
+                            (None, Some(_)) => StaleItem::MissingChecksum { path },
+                        };
+                        return DirtyReason::FsStatusOutdated(FsStatus::StaleItem(item));
                     }
                 }
                 (
@@ -1865,6 +1934,13 @@ fn build_script_local_fingerprints(
     let pkg_root = unit.pkg.root().to_path_buf();
     let build_dir = build_root(build_runner);
     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
+    // Like dep-info, files of non-path packages are not worth reading:
+    // `find_stale_file` skips them in `$CARGO_HOME`.
+    let fingerprint = if unit.pkg.package_id().source_id().is_path() {
+        fingerprint_method(build_runner.bcx)?
+    } else {
+        FingerprintMethod::Mtime
+    };
     let calculate =
         move |deps: &BuildDeps, pkg_fingerprint: Option<&dyn Fn() -> CargoResult<String>>| {
             if deps.rerun_if_changed.is_empty() && deps.rerun_if_env_changed.is_empty() {
@@ -1899,6 +1975,7 @@ fn build_script_local_fingerprints(
                 &build_dir,
                 &pkg_root,
                 &env_config,
+                fingerprint,
             )))
         };
 
@@ -1935,6 +2012,7 @@ fn local_fingerprints_deps(
     build_root: &Path,
     pkg_root: &Path,
     env_config: &Arc<HashMap<String, OsString>>,
+    fingerprint: FingerprintMethod,
 ) -> Vec<LocalFingerprint> {
     debug!("new local fingerprints deps {:?}", pkg_root);
     let mut local = Vec::new();
@@ -1951,9 +2029,22 @@ fn local_fingerprints_deps(
         let paths = deps
             .rerun_if_changed
             .iter()
-            .map(|p| p.strip_prefix(pkg_root).unwrap_or(p).to_path_buf())
-            .collect();
-        local.push(LocalFingerprint::RerunIfChanged { output, paths });
+            .map(|p| p.strip_prefix(pkg_root).unwrap_or(p).to_path_buf());
+        local.push(match fingerprint {
+            FingerprintMethod::Mtime => LocalFingerprint::RerunIfChanged {
+                output,
+                paths: paths.collect(),
+            },
+            FingerprintMethod::Content => LocalFingerprint::RerunIfChangedContent {
+                output,
+                paths: paths
+                    .map(|p| {
+                        let checksum = content_checksum(&pkg_root.join(&p)).ok();
+                        (p, checksum)
+                    })
+                    .collect(),
+            },
+        });
     }
 
     local.extend(
@@ -2106,12 +2197,53 @@ pub fn fingerprint_method(bcx: &BuildContext<'_, '_>) -> CargoResult<Fingerprint
 
 fn pkg_fingerprint(bcx: &BuildContext<'_, '_>, pkg: &Package) -> CargoResult<String> {
     let source_id = pkg.package_id().source_id();
+    // A path source fingerprints a package by its newest mtime.
+    if source_id.is_path() && fingerprint_method(bcx)? == FingerprintMethod::Content {
+        let files = crate::sources::path::list_files(pkg, bcx.gctx)?;
+        let (_, checksum) = checksum_listing(pkg.root(), files.iter().map(|f| &**f).collect())?;
+        return Ok(format!("content {checksum}"));
+    }
     let sources = bcx.packages.sources();
 
     let source = sources
         .get(source_id)
         .ok_or_else(|| internal("missing package source"))?;
     source.fingerprint(pkg)
+}
+
+/// Size and checksum of a file. For a directory, those of a listing of every
+/// file below it.
+fn content_checksum(path: &Path) -> io::Result<(u64, Checksum)> {
+    if !fs::metadata(path)?.is_dir() {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        return Ok((len, Checksum::compute(ChecksumAlgo::Blake3, file)?));
+    }
+    // Like `paths::mtime_recursive`, skip what cannot be walked.
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| !e.file_type().is_dir())
+        .map(|e| e.into_path())
+        .collect();
+    checksum_listing(path, files.iter().map(|f| f.as_path()).collect())
+}
+
+/// Size and checksum of a listing of each file's path relative to `root`,
+/// size, and checksum, so that renames, additions and removals also count.
+fn checksum_listing(root: &Path, mut files: Vec<&Path>) -> io::Result<(u64, Checksum)> {
+    files.sort_unstable();
+    let mut listing = String::new();
+    for file in files {
+        let rel = file.strip_prefix(root).unwrap_or(file).display();
+        listing.push_str(&match content_checksum(file) {
+            Ok((len, checksum)) => format!("{rel} {len} {checksum}\n"),
+            Err(_) => format!("{rel} unreadable\n"),
+        });
+    }
+    let checksum = Checksum::compute(ChecksumAlgo::Blake3, listing.as_bytes())?;
+    Ok((listing.len() as u64, checksum))
 }
 
 /// The `reference` file is considered as "stale" if any file from `paths` has a newer mtime.
