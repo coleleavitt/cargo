@@ -1941,3 +1941,64 @@ fn rerun_if_changed_directory_uses_content() {
 "#]])
         .run();
 }
+
+#[cargo_test(nightly, reason = "content fingerprints need a nightly rustc")]
+fn manifest_dir_env_tracked_across_trees() {
+    // Identical copies of a package that embeds its own path, sharing a
+    // target dir. Only `CARGO_MANIFEST_DIR` and `CARGO_MANIFEST_PATH` differ.
+    let target = paths::root().join("shared-target");
+    let main = r#"
+        fn main() {
+            println!("{}", env!("CARGO_MANIFEST_DIR"));
+            println!("{}", env!("CARGO_MANIFEST_PATH"));
+        }
+    "#;
+    let one = project()
+        .at("one")
+        .file("Cargo.toml", &basic_manifest("foo", "0.0.1"))
+        .file("src/main.rs", main)
+        .build();
+    let two = project()
+        .at("two")
+        .file("Cargo.toml", &basic_manifest("foo", "0.0.1"))
+        .file("src/main.rs", main)
+        .build();
+    two.root().move_into_the_past();
+
+    one.cargo("run")
+        .env("CARGO_TARGET_DIR", &target)
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stdout_data(str![[r#"
+[ROOT]/one
+[ROOT]/one/Cargo.toml
+
+"#]])
+        .run();
+    two.cargo("run")
+        .env("CARGO_TARGET_DIR", &target)
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stdout_data(str![[r#"
+[ROOT]/two
+[ROOT]/two/Cargo.toml
+
+"#]])
+        .run();
+    // Back in the first tree, the first tree's paths are tracked again.
+    one.cargo("run -v")
+        .env("CARGO_TARGET_DIR", &target)
+        .masquerade_as_nightly_cargo(&["content fingerprint by default"])
+        .with_stdout_data(str![[r#"
+[ROOT]/one
+[ROOT]/one/Cargo.toml
+
+"#]])
+        .with_stderr_data(str![[r#"
+[DIRTY] foo v0.0.1 ([ROOT]/one): the environment variable CARGO_MANIFEST_DIR changed
+[COMPILING] foo v0.0.1 ([ROOT]/one)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `[ROOT]/shared-target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}

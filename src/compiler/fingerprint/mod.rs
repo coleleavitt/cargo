@@ -426,6 +426,7 @@ use self::dep_info::ChecksumAlgo;
 pub use self::dep_info::parse_dep_info;
 pub use self::dep_info::parse_rustc_dep_info;
 pub use self::dep_info::translate_dep_info;
+use self::dep_info::{CARGO_MANIFEST_DIR_ENV, CARGO_MANIFEST_PATH_ENV};
 pub use self::dirty_reason::DirtyReason;
 pub use self::rustdoc::RustdocFingerprint;
 
@@ -985,6 +986,10 @@ impl LocalFingerprint {
                                 cargo_exe.display()
                             )
                         })?)
+                    } else if key == CARGO_MANIFEST_DIR_ENV {
+                        pkg_root.to_str()
+                    } else if key == CARGO_MANIFEST_PATH_ENV {
+                        pkg.manifest_path().to_str()
                     } else {
                         if let Some(value) = gctx.env_config()?.get(key) {
                             value.to_str()

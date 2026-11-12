@@ -24,6 +24,9 @@ use crate::CARGO_ENV;
 use crate::CargoResult;
 use crate::workspace::manifest::ManifestMetadata;
 
+pub const CARGO_MANIFEST_DIR_ENV: &str = "CARGO_MANIFEST_DIR";
+pub const CARGO_MANIFEST_PATH_ENV: &str = "CARGO_MANIFEST_PATH";
+
 /// The current format version of [`EncodedDepInfo`].
 const CURRENT_ENCODED_DEP_INFO_VERSION: u8 = 1;
 
@@ -342,11 +345,16 @@ pub fn translate_dep_info(
     // not tracked elsewhere in the fingerprint.
     //
     // For cargo#13280, We trace env vars that are defined in the `[env]` config table.
+    //
+    // The package path vars are tracked too: the same unit can be built from
+    // another source tree that shares or copies this build dir.
     on_disk_info.env.retain(|(key, _)| {
         ManifestMetadata::should_track(key)
             || env_config.contains_key(key)
             || !rustc_cmd.get_envs().contains_key(key)
             || key == CARGO_ENV
+            || key == CARGO_MANIFEST_DIR_ENV
+            || key == CARGO_MANIFEST_PATH_ENV
     });
 
     let serialize_path = |file| {
