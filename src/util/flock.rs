@@ -19,11 +19,8 @@ use crate::util::style;
 use anyhow::Context as _;
 use cargo_util::paths;
 
-pub(crate) use self::imp::lock_exclusive;
 pub(crate) use self::imp::lock_shared;
-#[expect(unused_imports, reason = "for non-blocking lock callers")]
 pub(crate) use self::imp::try_lock_exclusive;
-#[expect(unused_imports, reason = "for non-blocking lock callers")]
 pub(crate) use self::imp::try_lock_shared;
 pub(crate) use self::imp::unlock;
 
@@ -366,7 +363,7 @@ impl PartialEq<Filesystem> for Path {
     }
 }
 
-fn try_acquire(path: &Path, lock_try: &dyn Fn() -> Result<(), TryLockError>) -> CargoResult<bool> {
+pub(crate) fn try_acquire(path: &Path, lock_try: &dyn Fn() -> Result<(), TryLockError>) -> CargoResult<bool> {
     // File locking on Unix is currently implemented via `flock`, which is known
     // to be broken on NFS. We could in theory just ignore errors that happen on
     // NFS, but apparently the failure mode [1] for `flock` on NFS is **blocking

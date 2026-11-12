@@ -100,7 +100,6 @@ use self::trim_paths::trim_paths_args_rustdoc;
 use self::unit_graph::UnitDep;
 
 use crate::compiler::future_incompat::FutureIncompatReport;
-use crate::compiler::locking::LockKey;
 use crate::compiler::timings::SectionTiming;
 pub use crate::compiler::unit::Unit;
 pub use crate::compiler::unit::UnitIndex;
@@ -207,6 +206,9 @@ fn compile<'gctx>(
     } else {
         None
     };
+    // Another cargo was compiling this unit or a dependency during planning: plan it as dirty, and
+    // let its job check it again once it has waited for the other cargo.
+    let contended = matches!(lock, Some((_, _, true)));
 
     match build_runner
         .bcx
@@ -233,54 +235,59 @@ fn compile<'gctx>(
         // we've got everything constructed.
         fingerprint::prepare_init(build_runner, unit)?;
 
-        let job = if unit.mode.is_run_custom_build() {
-            custom_build::prepare(build_runner, unit)?
+        let mut force = false;
+        let (mut job, fresh) = if unit.mode.is_run_custom_build() {
+            custom_build::prepare(build_runner, unit, contended)?
         } else if unit.mode.is_doc_test() {
             // We run these targets later, so this is just a no-op for now.
-            Job::new_fresh()
+            (Job::new_fresh(), None)
         } else {
-            let force = exec.force_rebuild(unit) || force_rebuild;
-            let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
-            job.before(if job.freshness().is_dirty() {
+            force = exec.force_rebuild(unit) || force_rebuild;
+            let mut job = fingerprint::prepare_target(build_runner, unit, force || contended)?;
+            if job.freshness().is_dirty() {
                 let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
                     rustdoc(build_runner, unit)?
                 } else {
                     rustc(build_runner, unit, exec)?
                 };
-                work.then(link_targets(build_runner, unit, false)?)
+                job.before(work.then(link_targets(build_runner, unit, false)?));
+                let fresh = lock.is_some().then(|| fresh_work(build_runner, unit));
+                (job, fresh.transpose()?)
             } else {
-                let output_options = OutputOptions::for_fresh(build_runner, unit);
-                let manifest = ManifestErrorContext::new(build_runner, unit);
-                let work = replay_output_cache(
-                    unit.pkg.package_id(),
-                    manifest,
-                    &unit.target,
-                    build_runner.files().message_cache_path(unit),
-                    output_options,
-                );
-                // Need to link targets on both the dirty and fresh.
-                work.then(link_targets(build_runner, unit, true)?)
-            });
-
-            // If -Zfine-grain-locking is enabled, we wrap the job with an upgrade to exclusive
-            // lock before starting, then downgrade to a shared lock after the job is finished.
-            if build_runner.bcx.gctx.cli_unstable().fine_grain_locking && job.freshness().is_dirty()
-            {
-                if let Some(lock) = lock {
-                    // Here we unlock the current shared lock to avoid deadlocking with other cargo
-                    // processes. Then we configure our compile job to take an exclusive lock
-                    // before starting. Once we are done compiling (including both rmeta and rlib)
-                    // we downgrade to a shared lock to allow other cargo's to read the build unit.
-                    // We will hold this shared lock for the remainder of compilation to prevent
-                    // other cargo from re-compiling while we are still using the unit.
-                    build_runner.lock_manager.unlock(&lock)?;
-                    job.before(prebuild_lock_exclusive(lock.clone()));
-                    job.after(downgrade_lock_to_shared(lock));
-                }
+                job.before(fresh_work(build_runner, unit)?);
+                (job, None)
             }
-
-            job
         };
+
+        // With -Zfine-grain-locking, a dirty job takes the unit's exclusive lock before it
+        // compiles, then downgrades it to a shared lock, which it holds for the rest of the build
+        // so that no other cargo recompiles the unit while we use it. When another cargo has
+        // built the unit in the meantime, the job does the work of a fresh unit instead. See
+        // `LockManager::lock_to_build`.
+        if let Some((key, locked, _)) = lock
+            && job.freshness().is_dirty()
+        {
+            if locked {
+                build_runner.lock_manager.unlock(&key)?;
+            }
+            let fresh = fresh.unwrap_or_else(Work::noop);
+            let fingerprint_path = build_runner.files().fingerprint_file_path(unit, "");
+            job.wrap(move |dirty| {
+                Work::new(move |state| {
+                    if state.lock_to_build(&key, !force)? {
+                        // As `fingerprint::prepare_target` would without fine grain locking: a
+                        // build interrupted from now on must not leave a valid fingerprint.
+                        if fingerprint_path.exists() {
+                            paths::write(&fingerprint_path, b"")?;
+                        }
+                        dirty.call(state)?;
+                        state.downgrade_to_shared(&key)
+                    } else {
+                        fresh.call(state)
+                    }
+                })
+            });
+        }
         jobs.enqueue(build_runner, unit, job)?;
     }
 
@@ -681,18 +688,19 @@ fn verbose_if_simple_exit_code(err: Error) -> Error {
     }
 }
 
-fn prebuild_lock_exclusive(lock: LockKey) -> Work {
-    Work::new(move |state| {
-        state.lock_exclusive(&lock)?;
-        Ok(())
-    })
-}
-
-fn downgrade_lock_to_shared(lock: LockKey) -> Work {
-    Work::new(move |state| {
-        state.downgrade_to_shared(&lock)?;
-        Ok(())
-    })
+/// The work of a fresh unit: its cached compiler output replayed, and its outputs linked.
+fn fresh_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Work> {
+    let output_options = OutputOptions::for_fresh(build_runner, unit);
+    let manifest = ManifestErrorContext::new(build_runner, unit);
+    let work = replay_output_cache(
+        unit.pkg.package_id(),
+        manifest,
+        &unit.target,
+        build_runner.files().message_cache_path(unit),
+        output_options,
+    );
+    // Need to link targets on both the dirty and fresh.
+    Ok(work.then(link_targets(build_runner, unit, true)?))
 }
 
 /// Link the compiled target (often of form `foo-{metadata_hash}`) to the

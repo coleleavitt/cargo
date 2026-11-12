@@ -1,6 +1,6 @@
 //! See [`JobState`].
 
-use std::{cell::Cell, marker, sync::Arc};
+use std::{cell::Cell, marker, sync::Arc, sync::mpsc};
 
 use cargo_util::ProcessBuilder;
 
@@ -155,8 +155,35 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
             .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
     }
 
-    pub fn lock_exclusive(&self, lock: &LockKey) -> CargoResult<()> {
-        self.lock_manager.lock(lock)
+    /// See [`LockManager::lock_to_build`].
+    pub fn lock_to_build(&self, lock: &LockKey, recheck: bool) -> CargoResult<bool> {
+        self.lock_manager.lock_to_build(self, lock, recheck)
+    }
+
+    /// Tells the main thread that this job waits for the lock of the unit named `name`. The job
+    /// gives back its jobserver token until [`JobState::resume_after_lock`], so that a waiting job
+    /// does not keep the other jobs of this build from running.
+    pub fn blocked_on_lock(&self, name: &str) {
+        self.messages
+            .push(Message::BlockedOnLock(self.id, name.to_string()));
+    }
+
+    /// Waits until the main thread gives this job a jobserver token again, after
+    /// [`JobState::blocked_on_lock`].
+    pub fn resume_after_lock(&self) -> CargoResult<()> {
+        let (tx, rx) = mpsc::channel();
+        self.messages.push(Message::ResumeAfterLock(self.id, tx));
+        rx.recv()
+            .map_err(|_| anyhow::format_err!("the build stopped while a job waited for a lock"))
+    }
+
+    /// Asks the main thread whether this job's unit, which planning found dirty, is fresh now:
+    /// another cargo sharing the build directory built it while this job waited for its lock.
+    pub fn fresh_after_wait(&self) -> CargoResult<bool> {
+        let (tx, rx) = mpsc::channel();
+        self.messages.push(Message::FreshAfterWait(self.id, tx));
+        rx.recv()
+            .map_err(|_| anyhow::format_err!("the build stopped while a job waited for a lock"))?
     }
 
     pub fn downgrade_to_shared(&self, lock: &LockKey) -> CargoResult<()> {

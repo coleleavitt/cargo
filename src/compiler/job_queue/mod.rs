@@ -117,7 +117,8 @@ use cargo_util::collections::{HashMap, HashSet};
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::mem;
+use std::sync::{Arc, mpsc};
 use std::thread::{self, Scope};
 use std::time::Duration;
 use std::{env, io};
@@ -136,6 +137,7 @@ use super::CompileMode;
 use super::Unit;
 use super::UnitIndex;
 use super::custom_build::Severity;
+use super::fingerprint;
 use super::timings::SectionTiming;
 use super::timings::Timings;
 use crate::compiler::descriptive_pkg_name;
@@ -149,7 +151,7 @@ use crate::util::diagnostic_server::{self, DiagnosticPrinter};
 use crate::util::errors::AlreadyPrintedError;
 use crate::util::interning::InternedString;
 use crate::util::machine_message::{self, Message as _};
-use crate::util::{self, internal};
+use crate::util::{self, internal, style};
 use crate::util::{DependencyQueue, GlobalContext, Progress, ProgressStyle, Queue};
 use crate::workspace::{PackageId, TargetKind};
 use cargo_util_terminal::Shell;
@@ -205,6 +207,17 @@ struct DrainState<'gctx> {
     /// retrieved from the `queue`. We eagerly pull jobs off the main queue to
     /// allow us to request jobserver tokens pretty early.
     pending_queue: Vec<(Unit, Job, usize)>,
+
+    /// Running jobs that wait for the lock of their build unit, from another cargo, and have
+    /// given back their jobserver token (see [`JobState::blocked_on_lock`]).
+    blocked_on_lock: HashSet<JobId>,
+    /// Jobs done waiting for a lock that wait for a jobserver token again, and the number of
+    /// tokens to request for them (see [`JobState::resume_after_lock`]).
+    resuming: Vec<(JobId, mpsc::Sender<()>)>,
+    resume_token_requests: usize,
+    /// See [`fingerprint::fresh_after_wait`].
+    recheck_cache: fingerprint::RecheckCache,
+
     print: DiagnosticPrinter<'gctx>,
 
     /// How many jobs we've finished
@@ -392,6 +405,12 @@ enum Message {
     /// Peak resident set size (in bytes) of a unit's process, for `--timings`.
     PeakMemory(JobId, u64),
     UnusedExterns(JobId, std::collections::BTreeSet<InternedString>),
+    /// See [`JobState::blocked_on_lock`].
+    BlockedOnLock(JobId, String),
+    /// See [`JobState::resume_after_lock`].
+    ResumeAfterLock(JobId, mpsc::Sender<()>),
+    /// See [`JobState::fresh_after_wait`].
+    FreshAfterWait(JobId, mpsc::Sender<CargoResult<bool>>),
 }
 
 impl<'gctx> JobQueue<'gctx> {
@@ -519,6 +538,10 @@ impl<'gctx> JobQueue<'gctx> {
                 .collect(),
             tokens: Vec::new(),
             pending_queue: Vec::new(),
+            blocked_on_lock: HashSet::default(),
+            resuming: Vec::new(),
+            resume_token_requests: 0,
+            recheck_cache: Default::default(),
             print: DiagnosticPrinter::new(
                 build_runner.bcx.gctx,
                 &build_runner.bcx.rustc().workspace_wrapper,
@@ -584,6 +607,17 @@ impl<'gctx> DrainState<'gctx> {
             }
         }
 
+        // Jobs that waited for a lock come first: they already run, and hold locks.
+        for _ in 0..mem::take(&mut self.resume_token_requests) {
+            jobserver_helper.request_token();
+        }
+        while self.has_extra_tokens() && !self.resuming.is_empty() {
+            let (id, tx) = self.resuming.remove(0);
+            self.blocked_on_lock.remove(&id);
+            // The job is gone if it failed in the meantime.
+            let _ = tx.send(());
+        }
+
         // Now that we've learned of all possible work that we can execute
         // try to spawn it so long as we've got a jobserver token which says
         // we're able to perform some parallel work.
@@ -610,7 +644,7 @@ impl<'gctx> DrainState<'gctx> {
     }
 
     fn has_extra_tokens(&self) -> bool {
-        self.active.len() < self.tokens.len() + 1
+        self.active.len() - self.blocked_on_lock.len() < self.tokens.len() + 1
     }
 
     fn handle_event(
@@ -682,6 +716,8 @@ impl<'gctx> DrainState<'gctx> {
                         trace!("end: {:?}", id);
                         self.finished += 1;
                         let unit = self.active.remove(&id).unwrap();
+                        self.blocked_on_lock.remove(&id);
+                        self.resuming.retain(|(waiting, _)| *waiting != id);
                         // An error could add an entry for a `Unit`
                         // with 0 warnings but having fixable
                         // warnings be disallowed
@@ -767,6 +803,25 @@ impl<'gctx> DrainState<'gctx> {
             Message::PeakMemory(id, bytes) => {
                 self.timings.unit_peak_memory(build_runner, id, bytes);
             }
+            Message::BlockedOnLock(id, name) => {
+                self.blocked_on_lock.insert(id);
+                build_runner.bcx.gctx.shell().status_with_color(
+                    "Blocking",
+                    format!("waiting for file lock on {name}"),
+                    &style::NOTE,
+                )?;
+            }
+            Message::ResumeAfterLock(id, tx) => {
+                self.resuming.push((id, tx));
+                self.resume_token_requests += 1;
+            }
+            Message::FreshAfterWait(id, tx) => {
+                let unit = self.active[&id].clone();
+                let fresh =
+                    fingerprint::fresh_after_wait(build_runner, &unit, &mut self.recheck_cache);
+                // The job is gone if it failed in the meantime.
+                let _ = tx.send(fresh);
+            }
         }
 
         Ok(())
@@ -784,7 +839,8 @@ impl<'gctx> DrainState<'gctx> {
         if events.is_empty() {
             loop {
                 self.tick_progress();
-                self.tokens.truncate(self.active.len() - 1);
+                self.tokens
+                    .truncate((self.active.len() - self.blocked_on_lock.len()).saturating_sub(1));
                 match self.messages.pop(Duration::from_millis(500)) {
                     Some(message) => {
                         events.push(message);

@@ -376,6 +376,7 @@
 //! [`CompileMode::RunCustomBuild`]: crate::compiler::CompileMode::RunCustomBuild
 //! [`A-rebuild-detection`]: https://github.com/rust-lang/cargo/issues?q=is%3Aissue+is%3Aopen+label%3AA-rebuild-detection
 
+mod after_wait;
 mod dep_info;
 mod dirty_reason;
 mod rustdoc;
@@ -421,6 +422,7 @@ use super::UnitIndex;
 use super::Work;
 use super::custom_build::BuildDeps;
 
+pub use self::after_wait::{RecheckCache, fresh_after_wait};
 pub use self::dep_info::Checksum;
 pub use self::dep_info::parse_dep_info;
 pub use self::dep_info::parse_rustc_dep_info;
@@ -542,7 +544,10 @@ pub fn prepare_target(
     // But the executable is corrupt and needs to be rebuilt. Clearing the
     // fingerprint at step 3 ensures that Cargo never mistakes a partially
     // written output as up-to-date.
-    if loc.exists() {
+    //
+    // With `-Zfine-grain-locking`, the job does it once it holds the unit's
+    // exclusive lock: another cargo may use the unit until then.
+    if loc.exists() && !build_runner.bcx.gctx.cli_unstable().fine_grain_locking {
         // Truncate instead of delete so that compare_old_fingerprint will
         // still log the reason for the fingerprint failure instead of just
         // reporting "failed to read fingerprint" during the next build if
@@ -812,7 +817,7 @@ impl<'de> Deserialize<'de> for DepFingerprint {
 /// when the filesystem contains stale information (based on mtime currently).
 /// The paths here don't change much between compilations but they're used as
 /// inputs when we probe the filesystem looking at information.
-#[derive(Debug, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, Hash)]
 enum LocalFingerprint {
     /// This is a precalculated fingerprint which has an opaque string we just
     /// hash as usual. This variant is primarily used for rustdoc where we
@@ -1852,7 +1857,7 @@ fn build_script_local_fingerprints(
     assert!(unit.mode.is_run_custom_build());
     // First up, if this build script is entirely overridden, then we just
     // return the hash of what we overrode it with. This is the easy case!
-    if let Some(fingerprint) = build_script_override_fingerprint(build_runner, unit) {
+    if let Some(fingerprint) = build_script_override_fingerprint(unit) {
         debug!("override local fingerprints deps {}", unit.pkg);
         return Ok((
             Box::new(
@@ -1917,16 +1922,13 @@ fn build_script_local_fingerprints(
 
 /// Create a [`LocalFingerprint`] for an overridden build script.
 /// Returns None if it is not overridden.
-fn build_script_override_fingerprint(
-    build_runner: &mut BuildRunner<'_, '_>,
-    unit: &Unit,
-) -> Option<LocalFingerprint> {
-    // Build script output is only populated at this stage when it is
-    // overridden.
-    let build_script_outputs = build_runner.build_script_outputs.lock().unwrap();
-    let metadata = build_runner.get_run_build_script_metadata(unit);
-    // Returns None if it is not overridden.
-    let output = build_script_outputs.get(metadata)?;
+fn build_script_override_fingerprint(unit: &Unit) -> Option<LocalFingerprint> {
+    // The override from the config, not the build script outputs that
+    // `custom_build::build_map` fills with it: during the build, those also
+    // hold the outputs of scripts that ran, and with `-Zfine-grain-locking`
+    // fingerprints are computed again then.
+    let links = unit.pkg.manifest().links()?;
+    let output = unit.links_overrides.get(links)?;
     let s = format!(
         "overridden build state with hash: {}",
         util::hash_u64(output)
