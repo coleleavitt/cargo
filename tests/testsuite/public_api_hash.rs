@@ -465,3 +465,48 @@ fn line_shift_above_unused_generic_fn_skips_dependents() {
     );
     assert_eq!(location, "a/src/lib.rs:5:5");
 }
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn moving_unused_generic_skips_and_moving_used_generic_rebuilds() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let used = "pub fn used<T>(_: T) {\n    panic!(\"boom\");\n}\n";
+    let unused = "pub fn unused<T>(_: T) {}\n";
+    let p = panic_chain(
+        &format!("{used}{unused}"),
+        "pub fn run() { a::used(1u8) }\n",
+    );
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .run();
+
+    // Only `unused` moves: rustc reports that `b`'s copied code kept its positions.
+    p.change_file("a/src/lib.rs", &format!("{used}\n\n{unused}"));
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert_eq!(panic_location(&p, "target"), "a/src/lib.rs:2:5");
+    assert_eq!(panic_location(&p, "clean-target"), "a/src/lib.rs:2:5");
+
+    // `used` moves: `b`'s copy of it must be recompiled.
+    p.change_file("a/src/lib.rs", &format!("\n\n{used}\n\n{unused}"));
+    p.cargo("build -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[COMPILING] b v0.1.0 ([ROOT]/foo/b)
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert_eq!(panic_location(&p, "target"), "a/src/lib.rs:4:5");
+    assert_eq!(panic_location(&p, "clean-target"), "a/src/lib.rs:4:5");
+}
