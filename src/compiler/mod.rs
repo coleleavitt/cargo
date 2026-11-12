@@ -50,6 +50,7 @@ pub mod standard_lib;
 pub mod timings;
 pub(crate) mod trim_paths;
 mod unit;
+mod unit_cache;
 pub mod unit_dependencies;
 pub mod unit_graph;
 pub mod unused_deps;
@@ -233,7 +234,7 @@ fn compile<'gctx>(
         // we've got everything constructed.
         fingerprint::prepare_init(build_runner, unit)?;
 
-        let job = if unit.mode.is_run_custom_build() {
+        let mut job = if unit.mode.is_run_custom_build() {
             custom_build::prepare(build_runner, unit)?
         } else if unit.mode.is_doc_test() {
             // We run these targets later, so this is just a no-op for now.
@@ -281,6 +282,9 @@ fn compile<'gctx>(
 
             job
         };
+        if let Some(cache) = &build_runner.unit_cache {
+            cache.prepare_job(unit, &mut job)?;
+        }
         jobs.enqueue(build_runner, unit, job)?;
     }
 

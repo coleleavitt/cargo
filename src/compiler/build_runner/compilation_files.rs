@@ -314,6 +314,12 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         self.layout(unit.kind).build_dir().fingerprint(&dir)
     }
 
+    /// The `build/<pkg>/<hash>` directory holding everything of a build unit. (new layout)
+    pub fn build_unit_dir(&self, unit: &Unit) -> PathBuf {
+        let dir = self.pkg_dir(unit);
+        self.layout(unit.kind).build_dir().build_unit(&dir)
+    }
+
     /// The lock location for a given build unit.
     pub fn build_unit_lock(&self, unit: &Unit) -> PathBuf {
         let dir = self.pkg_dir(unit);
