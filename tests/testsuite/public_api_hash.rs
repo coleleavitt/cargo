@@ -160,3 +160,76 @@ fn private_change_check_stops_at_changed_crate() {
 "#]])
         .run();
 }
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn public_const_value_change_rebuilds_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                b = { path = "b" }
+            "#,
+        )
+        .file("src/main.rs", "fn main() { println!(\"{}\", b::get()); }")
+        .file(
+            "b/Cargo.toml",
+            r#"
+                [package]
+                name = "b"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                a = { path = "../a" }
+            "#,
+        )
+        .file("b/src/lib.rs", "pub fn get() -> u32 { a::C }\n")
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.1.0"
+                edition = "2021"
+            "#,
+        )
+        .file("a/src/lib.rs", "mod m;\nmod p;\npub use m::C;\n")
+        .file("a/src/m.rs", "pub const C: u32 = crate::p::V;\n")
+        .file("a/src/p.rs", "pub(crate) const V: u32 = 1;\n")
+        .build();
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stdout_data(str![[r#"
+1
+
+"#]])
+        .run();
+
+    // `C`'s value is part of `a`'s public API although it comes from a private const, and `b`
+    // compiled it into its own code.
+    p.change_file("a/src/p.rs", "pub(crate) const V: u32 = 2;\n");
+    p.cargo("run -Zpublic-api-hash")
+        .masquerade_as_nightly_cargo(&["public-api-hash"])
+        .with_stdout_data(str![[r#"
+2
+
+"#]])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[COMPILING] b v0.1.0 ([ROOT]/foo/b)
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}
