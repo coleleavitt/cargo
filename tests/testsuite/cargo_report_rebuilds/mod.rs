@@ -152,7 +152,7 @@ Rebuild impact:
   cascading:     0 units
 
 Root rebuilds:
-  0. foo@0.0.0 (check): file modified: src/lib.rs
+  0. foo@0.0.0 (check): file size changed: src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
 
 "#]])
@@ -272,7 +272,7 @@ Rebuild impact:
   cascading:     4 units
 
 Root rebuilds:
-  0. deeper@0.0.0 (check): file modified: deeper/src/lib.rs
+  0. deeper@0.0.0 (check): file size changed: deeper/src/lib.rs (0 -> 10 bytes)
      impact: 4 dependent units rebuilt
 
 [NOTE] pass `-vv` to show all affected rebuilt unit lists
@@ -292,7 +292,7 @@ Rebuild impact:
   cascading:     4 units
 
 Root rebuilds:
-  0. deeper@0.0.0 (check): file modified: deeper/src/lib.rs
+  0. deeper@0.0.0 (check): file size changed: deeper/src/lib.rs (0 -> 10 bytes)
      impact: 4 dependent units rebuilt
        - deep@0.0.0 (check)
        - dep@0.0.0 (check)
@@ -381,13 +381,13 @@ Rebuild impact:
 Root rebuilds: (top 5 of 6 by impact)
   0. pkg1@0.0.0 (check): declared features changed: [] -> ["feat"]
      impact: no cascading rebuilds
-  1. pkg2@0.0.0 (check): file modified: pkg2/src/lib.rs
+  1. pkg2@0.0.0 (check): file size changed: pkg2/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
   2. pkg3@0.0.0 (check): target configuration changed
      impact: no cascading rebuilds
   3. pkg4@0.0.0 (check): environment variable changed (__CARGO_TEST_MY_FOO): <unset> -> 1
      impact: no cascading rebuilds
-  4. pkg5@0.0.0 (check): file modified: pkg5/src/lib.rs
+  4. pkg5@0.0.0 (check): file size changed: pkg5/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
 
 [NOTE] pass `--verbose` to show all root rebuilds
@@ -409,15 +409,15 @@ Rebuild impact:
 Root rebuilds:
   0. pkg1@0.0.0 (check): declared features changed: [] -> ["feat"]
      impact: no cascading rebuilds
-  1. pkg2@0.0.0 (check): file modified: pkg2/src/lib.rs
+  1. pkg2@0.0.0 (check): file size changed: pkg2/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
   2. pkg3@0.0.0 (check): target configuration changed
      impact: no cascading rebuilds
   3. pkg4@0.0.0 (check): environment variable changed (__CARGO_TEST_MY_FOO): <unset> -> 1
      impact: no cascading rebuilds
-  4. pkg5@0.0.0 (check): file modified: pkg5/src/lib.rs
+  4. pkg5@0.0.0 (check): file size changed: pkg5/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
-  5. pkg6@0.0.0 (check): file modified: pkg6/src/lib.rs
+  5. pkg6@0.0.0 (check): file size changed: pkg6/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
 
 "#]])
@@ -492,7 +492,7 @@ Rebuild impact:
   cascading:     2 units
 
 Root rebuilds:
-  0. common@0.0.0 (check): file modified: common/src/lib.rs
+  0. common@0.0.0 (check): file size changed: common/src/lib.rs (0 -> 10 bytes)
      impact: 2 dependent units rebuilt
 
 [NOTE] pass `-vv` to show all affected rebuilt unit lists
@@ -532,7 +532,7 @@ Rebuild impact:
   cascading:     0 units
 
 Root rebuilds:
-  0. foo@0.0.0 (check): file modified: foo/src/lib.rs
+  0. foo@0.0.0 (check): file size changed: foo/src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
 
 "#]])
@@ -584,7 +584,7 @@ Rebuild impact:
   cascading:     0 units
 
 Root rebuilds:
-  0. bar@0.0.0 (check): file modified: src/lib.rs
+  0. bar@0.0.0 (check): file size changed: src/lib.rs (0 -> 10 bytes)
      impact: no cascading rebuilds
 
 "#]])

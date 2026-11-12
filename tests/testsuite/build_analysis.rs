@@ -448,11 +448,10 @@ fn log_rebuild_reason_file_changed() {
     "cause": {
       "dirty_reason": "fs-status-outdated",
       "fs_status": "stale-item",
-      "reference": "[ROOT]/foo/target/debug/build/foo/[HASH]/fingerprint/dep-lib-foo",
-      "reference_mtime": "{...}",
-      "stale": "[ROOT]/foo/src/lib.rs",
-      "stale_item": "changed-file",
-      "stale_mtime": "{...}"
+      "new_size": 11,
+      "old_size": 0,
+      "path": "[ROOT]/foo/src/lib.rs",
+      "stale_item": "file-size-changed"
     },
     "index": 0,
     "reason": "unit-fingerprint",

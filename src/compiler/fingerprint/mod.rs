@@ -2181,7 +2181,6 @@ fn _compare_old_fingerprint(
     Ok(FingerprintComparison::Dirty { reason })
 }
 
-/// Calculates the fingerprint of a unit thats contains no dep-info files.
 /// The freshness method for local files.
 ///
 /// Content checksums are the default when both Cargo and rustc are nightly:
@@ -2200,9 +2199,10 @@ pub fn fingerprint_method(bcx: &BuildContext<'_, '_>) -> CargoResult<Fingerprint
     })
 }
 
+/// Calculates the fingerprint of a unit thats contains no dep-info files.
 fn pkg_fingerprint(bcx: &BuildContext<'_, '_>, pkg: &Package) -> CargoResult<String> {
     let source_id = pkg.package_id().source_id();
-    // A path source fingerprints a package by its newest mtime.
+    // The path source's own fingerprint is the newest mtime of the files.
     if source_id.is_path() && fingerprint_method(bcx)? == FingerprintMethod::Content {
         let files = crate::sources::path::list_files(pkg, bcx.gctx)?;
         let (_, checksum) = checksum_listing(pkg.root(), files.iter().map(|f| &**f).collect())?;
