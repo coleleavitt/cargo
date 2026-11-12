@@ -1722,7 +1722,11 @@ fn a_build_reuses_units_that_another_build_compiles_while_it_waits() {
     let runs = stderr.iter().flat_map(|s| rustc_runs(s)).collect();
     assert_eq!(
         sorted(runs),
-        sorted(["after", "build_script_build", "foo", "gate"].map(String::from).to_vec()),
+        sorted(
+            ["after", "build_script_build", "foo", "gate"]
+                .map(String::from)
+                .to_vec()
+        ),
         "each unit is compiled once:\n{}",
         stderr.join("\n----\n")
     );
@@ -1761,7 +1765,9 @@ fn a_build_waiting_for_a_lock_gives_back_its_jobserver_token() {
         .file("src/lib.rs", "pub fn other() {}")
         .publish();
     let manifest = |name: &str, deps: &str| {
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}")
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"
+        )
     };
     let first = project()
         .at("first")
@@ -1827,14 +1833,22 @@ fn a_build_waits_for_a_unit_that_another_build_uses_with_other_settings() {
         .file("src/lib.rs", "pub fn shared() {}")
         .publish();
     let manifest = |name: &str| {
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared-dep = \"1.0\"\n")
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared-dep = \"1.0\"\n"
+        )
     };
     // `first`'s own build script holds the build, with shared-dep locked shared as fresh.
     let first = project()
         .at("first")
         .file("Cargo.toml", &manifest("first"))
         .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
-        .file("build.rs", &GATE_BUILD_RS.replace("fn main() {", "fn main() {\n println!(\"cargo::rerun-if-env-changed=GATE\");"))
+        .file(
+            "build.rs",
+            &GATE_BUILD_RS.replace(
+                "fn main() {",
+                "fn main() {\n println!(\"cargo::rerun-if-env-changed=GATE\");",
+            ),
+        )
         .build();
     let second = project()
         .at("second")

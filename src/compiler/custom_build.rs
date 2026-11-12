@@ -278,11 +278,11 @@ impl LinkArgTarget {
 }
 
 /// Prepares a `Work` that executes the target as a custom build script.
-#[tracing::instrument(skip_all)]
 ///
 /// `force` makes the job dirty. Along with the job, this returns the work of a fresh job when the
 /// job is dirty, for `-Zfine-grain-locking` to use when another cargo has run the script in the
 /// meantime.
+#[tracing::instrument(skip_all)]
 pub fn prepare(
     build_runner: &mut BuildRunner<'_, '_>,
     unit: &Unit,
@@ -296,7 +296,10 @@ pub fn prepare(
         .contains_key(metadata)
     {
         // The output is already set, thus the build script is overridden.
-        Ok((fingerprint::prepare_target(build_runner, unit, force)?, None))
+        Ok((
+            fingerprint::prepare_target(build_runner, unit, force)?,
+            None,
+        ))
     } else {
         build_work(build_runner, unit, force)
     }
@@ -774,7 +777,9 @@ fn build_work(
         job.before(dirty);
         Ok((job, Some(fresh(None))))
     } else {
-        job.before(fresh(prev_output.map(|output| (output, prev_script_out_dir))));
+        job.before(fresh(
+            prev_output.map(|output| (output, prev_script_out_dir)),
+        ));
         Ok((job, None))
     }
 }
@@ -1396,7 +1401,6 @@ pub fn build_map(build_runner: &mut BuildRunner<'_, '_>) -> CargoResult<()> {
             scripts.to_link.push((pkg, metadata));
         }
     }
-
 }
 
 /// Load any dependency declarations from a previous build script run.

@@ -140,7 +140,13 @@ impl LockManager {
             bail!("lock was not found in lock manager: {key}");
         };
         let file = &lock.file;
-        let fresh = || if recheck { state.fresh_after_wait() } else { Ok(false) };
+        let fresh = || {
+            if recheck {
+                state.fresh_after_wait()
+            } else {
+                Ok(false)
+            }
+        };
 
         // Another build may have compiled the unit since planning, and be done with it.
         if try_lock(&key.0, file, flock::try_lock_exclusive)? {

@@ -363,7 +363,10 @@ impl PartialEq<Filesystem> for Path {
     }
 }
 
-pub(crate) fn try_acquire(path: &Path, lock_try: &dyn Fn() -> Result<(), TryLockError>) -> CargoResult<bool> {
+pub(crate) fn try_acquire(
+    path: &Path,
+    lock_try: &dyn Fn() -> Result<(), TryLockError>,
+) -> CargoResult<bool> {
     // File locking on Unix is currently implemented via `flock`, which is known
     // to be broken on NFS. We could in theory just ignore errors that happen on
     // NFS, but apparently the failure mode [1] for `flock` on NFS is **blocking
