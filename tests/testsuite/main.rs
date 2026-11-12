@@ -168,6 +168,7 @@ mod profile_targets;
 mod profile_trim_paths;
 mod progress;
 mod pub_priv;
+mod public_api_hash;
 mod publish;
 mod publish_lockfile;
 mod read_manifest;

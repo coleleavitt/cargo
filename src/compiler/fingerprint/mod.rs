@@ -381,6 +381,7 @@ mod dirty_reason;
 mod rustdoc;
 
 use cargo_util::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::env;
 use std::ffi::OsString;
@@ -402,6 +403,7 @@ use serde::ser;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use crate::compiler::CompileMode;
 use crate::compiler::unit_graph::UnitDep;
 use crate::context::FingerprintMethod;
 use crate::util;
@@ -584,10 +586,139 @@ pub fn prepare_target(
             write_fingerprint(&loc, &fingerprint)
         })
     } else {
-        Work::new(move |_| write_fingerprint(&loc, &fingerprint))
+        let public_api = PublicApiDeps::new(build_runner, unit, &fingerprint);
+        let cutoff = fingerprint.public_api_cutoff
+            && matches!(dirty_reason, DirtyReason::FsStatusOutdated(_));
+        if let Some(public_api) = public_api.as_ref().filter(|_| cutoff) {
+            let mut job = Job::new_dirty(
+                write_fingerprint_and_public_api_deps(&loc, &fingerprint, Some(&public_api)),
+                dirty_reason,
+            );
+            // If the public API hashes of the dependencies are the ones this unit was last
+            // compiled against, its outputs are still valid. Bump their mtime so the next build
+            // does not see the rebuilt dependencies as newer than this unit.
+            let outputs = fingerprint.outputs.clone();
+            let skip = Work::new(move |_| {
+                let now = FileTime::from_system_time(SystemTime::now());
+                for output in &outputs {
+                    filetime::set_file_mtime(output, now)?;
+                }
+                Ok(())
+            });
+            let check = public_api.clone();
+            job.set_cutoff(
+                move || check.unchanged(),
+                skip.then(write_fingerprint_and_public_api_deps(
+                    &loc,
+                    &fingerprint,
+                    Some(&public_api),
+                )),
+            );
+            return Ok(job);
+        }
+        write_fingerprint_and_public_api_deps(&loc, &fingerprint, public_api.as_ref())
     };
 
     Ok(Job::new_dirty(write_fingerprint, dirty_reason))
+}
+
+/// The public API hashes of a unit's dependencies that are reached through public-API edges
+/// (`-Zpublic-api-hash`), and the file recording the hashes the unit was last compiled against.
+#[derive(Clone)]
+struct PublicApiDeps {
+    record: PathBuf,
+    deps: Vec<(InternedString, PathBuf)>,
+}
+
+impl PublicApiDeps {
+    fn new(
+        build_runner: &BuildRunner<'_, '_>,
+        unit: &Unit,
+        fingerprint: &Fingerprint,
+    ) -> Option<PublicApiDeps> {
+        let deps: Vec<_> = fingerprint
+            .deps
+            .iter()
+            .filter_map(|dep| Some((dep.name, dep.public_api_hash_path.clone()?)))
+            .collect();
+        (!deps.is_empty()).then(|| PublicApiDeps {
+            record: build_runner
+                .files()
+                .fingerprint_file_path(unit, "dep-public-api-hashes-"),
+            deps,
+        })
+    }
+
+    /// The dependencies' current public API hashes. A missing hash file (the dependency was
+    /// compiled by a rustc that did not report one) leaves the dependency out.
+    fn current(&self) -> BTreeMap<InternedString, String> {
+        self.deps
+            .iter()
+            .filter_map(|(name, path)| Some((*name, paths::read(path).ok()?)))
+            .collect()
+    }
+
+    /// Whether every dependency has a public API hash and it equals the recorded one.
+    fn unchanged(&self) -> bool {
+        let Ok(recorded) = paths::read(&self.record) else {
+            return false;
+        };
+        let Ok(recorded) = serde_json::from_str::<BTreeMap<InternedString, String>>(&recorded)
+        else {
+            return false;
+        };
+        let current = self.current();
+        let unchanged = current.len() == self.deps.len() && current == recorded;
+        debug!(
+            "public API hashes of dependencies for {:?}: unchanged={unchanged}",
+            self.record
+        );
+        unchanged
+    }
+
+    fn write(&self) -> CargoResult<()> {
+        paths::write(&self.record, serde_json::to_string(&self.current())?)
+    }
+}
+
+fn write_fingerprint_and_public_api_deps(
+    loc: &Path,
+    fingerprint: &Arc<Fingerprint>,
+    public_api: Option<&PublicApiDeps>,
+) -> Work {
+    let loc = loc.to_path_buf();
+    let fingerprint = Arc::clone(fingerprint);
+    let public_api = public_api.cloned();
+    Work::new(move |_| {
+        if let Some(public_api) = public_api {
+            public_api.write()?;
+        }
+        write_fingerprint(&loc, &fingerprint)
+    })
+}
+
+/// With `-Zpublic-api-hash`, the file where `unit` stores the public API hash that rustc reports
+/// for its metadata. `None` unless `unit` is a library whose dependents can only use its
+/// metadata (not a proc-macro, dylib or other linked output).
+pub fn public_api_hash_path(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> Option<PathBuf> {
+    let metadata_only = matches!(unit.mode, CompileMode::Build | CompileMode::Check { .. })
+        && !unit.requires_upstream_objects();
+    // A unit skipped this way never takes the exclusive lock of `-Zfine-grain-locking`.
+    let enabled = build_runner.bcx.target_data.info(unit.kind).public_api_hash
+        && !build_runner.bcx.gctx.cli_unstable().fine_grain_locking;
+    (metadata_only && enabled).then(|| {
+        build_runner
+            .files()
+            .fingerprint_file_path(unit, "public-api-hash-")
+    })
+}
+
+/// Whether compiling `unit` uses the object code of its dependencies (it links), so it has to
+/// run again whenever a dependency is rebuilt, whatever its public API.
+fn links_dependencies(unit: &Unit) -> bool {
+    let metadata_only = unit.mode.is_check()
+        || (unit.mode == CompileMode::Build && !unit.requires_upstream_objects());
+    !metadata_only
 }
 
 /// Dependency edge information for fingerprints. This is generated for each
@@ -609,6 +740,9 @@ struct DepFingerprint {
     /// The dependency's fingerprint we recursively point to, containing all the
     /// other hash information we'd otherwise need.
     fingerprint: Arc<Fingerprint>,
+    /// With `-Zpublic-api-hash`, the file holding the dependency's public API hash, if this
+    /// edge only depends on the dependency's public API (see [`public_api_hash_path`]).
+    public_api_hash_path: Option<PathBuf>,
 }
 
 /// A fingerprint can be considered to be a "short string" representing the
@@ -685,6 +819,10 @@ pub struct Fingerprint {
     /// fingerprints output files are regenerated and look newer than this one.
     #[serde(skip)]
     outputs: Vec<PathBuf>,
+    /// Set by `check_filesystem` when the unit is stale only because of dependencies reached
+    /// through public-API edges, so it can skip rustc if their public API hashes are unchanged.
+    #[serde(skip)]
+    public_api_cutoff: bool,
 }
 
 /// Indication of the status on the filesystem for a particular unit.
@@ -791,6 +929,7 @@ impl<'de> Deserialize<'de> for DepFingerprint {
             // `check_filesystem` which isn't used by fingerprints loaded from
             // disk.
             only_requires_rmeta: false,
+            public_api_hash_path: None,
         })
     }
 }
@@ -1055,6 +1194,7 @@ impl Fingerprint {
             index: UnitIndex::default(),
             fs_status: FsStatus::Stale,
             outputs: Vec::new(),
+            public_api_cutoff: false,
         }
     }
 
@@ -1298,6 +1438,10 @@ impl Fingerprint {
             pkg_root, max_path, max_mtime
         );
 
+        // With `-Zpublic-api-hash`, a stale dependency reached through a public-API edge does not
+        // end the check: the unit may still be skipped if the dependency's public API hash turns
+        // out unchanged, which is only known once the dependency is built.
+        let mut public_api_stale = None;
         for dep in self.deps.iter() {
             let dep_mtimes = match &dep.fingerprint.fs_status {
                 FsStatus::UpToDate { mtimes } => mtimes,
@@ -1306,9 +1450,14 @@ impl Fingerprint {
                 | FsStatus::StaleItem(_)
                 | FsStatus::StaleDependency { .. }
                 | FsStatus::StaleDepFingerprint { .. } => {
-                    self.fs_status = FsStatus::StaleDepFingerprint {
+                    let status = FsStatus::StaleDepFingerprint {
                         unit: dep.fingerprint.index,
                     };
+                    if dep.public_api_hash_path.is_some() {
+                        public_api_stale.get_or_insert(status);
+                        continue;
+                    }
+                    self.fs_status = status;
                     return Ok(());
                 }
             };
@@ -1349,12 +1498,16 @@ impl Fingerprint {
                     dep.name, dep_mtime, max_mtime, pkg_root
                 );
 
-                self.fs_status = FsStatus::StaleDependency {
+                let status = FsStatus::StaleDependency {
                     unit: dep.fingerprint.index,
                     dep_mtime: *dep_mtime,
                     max_mtime: *max_mtime,
                 };
-
+                if dep.public_api_hash_path.is_some() {
+                    public_api_stale.get_or_insert(status);
+                    continue;
+                }
+                self.fs_status = status;
                 return Ok(());
             }
         }
@@ -1377,6 +1530,12 @@ impl Fingerprint {
                 self.fs_status = FsStatus::StaleItem(item);
                 return Ok(());
             }
+        }
+
+        if let Some(status) = public_api_stale {
+            self.fs_status = status;
+            self.public_api_cutoff = true;
+            return Ok(());
         }
 
         // Everything was up to date! Record such.
@@ -1425,6 +1584,7 @@ impl hash::Hash for Fingerprint {
             public,
             fingerprint,
             only_requires_rmeta: _, // static property, no need to hash
+            public_api_hash_path: _, // same
         } in deps
         {
             pkg_id.hash(h);
@@ -1459,12 +1619,18 @@ impl DepFingerprint {
             util::hash_u64(dep.unit.pkg.package_id())
         };
 
+        let public_api_hash_path = if links_dependencies(parent) {
+            None
+        } else {
+            public_api_hash_path(build_runner, &dep.unit)
+        };
         Ok(DepFingerprint {
             pkg_id,
             name: dep.extern_crate_name,
             public: dep.public,
             fingerprint,
             only_requires_rmeta: build_runner.only_requires_rmeta(parent, &dep.unit),
+            public_api_hash_path,
         })
     }
 }
@@ -1705,6 +1871,11 @@ fn calculate_normal(
         .should_embed_metadata()
         .not()
         .hash(&mut config);
+    // -Zpublic-api-hash changes what rustc writes into metadata. Hashed only when on, so
+    // fingerprints of builds without it stay the same.
+    if build_runner.bcx.target_data.info(unit.kind).public_api_hash {
+        "public-api-hash".hash(&mut config);
+    }
 
     let compile_kind = unit.kind.fingerprint_hash();
     let mut declared_features = unit.pkg.summary().features().keys().collect::<Vec<_>>();
@@ -1728,6 +1899,7 @@ fn calculate_normal(
         rustflags: extra_flags,
         fs_status: FsStatus::Stale,
         outputs,
+        public_api_cutoff: false,
     })
 }
 
