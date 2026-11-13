@@ -372,17 +372,19 @@ impl TargetInfo {
                     .get_env("CARGO_PUBLIC_API_HASH")
                     .is_ok_and(|v| v == "0" || v == "false");
             let public_api_hash = !opted_out && {
-                let mut probe = rustc.workspace_process();
-                apply_env_config(gctx, &mut probe)?;
-                probe
-                    .arg("-")
-                    .arg("--crate-name")
-                    .arg("___")
-                    .arg("--print=sysroot")
-                    .arg("-Zpublic-api-hash")
-                    .env_remove("RUSTC_LOG");
-                kind.add_target_arg(&mut probe);
-                let supported = rustc.cached_output(&probe, extra_fingerprint).is_ok();
+                // Ask `-Zhelp` instead of running rustc with the flag: an unsupported flag would
+                // be a failed rustc call, and failed calls are not cached, so every build would
+                // run the probe again (and report a rustc info cache miss).
+                let rustc_pre = rustc.version.pre.as_str();
+                let supported = (rustc_pre.starts_with("nightly") || rustc_pre.starts_with("dev"))
+                    && {
+                        let mut probe = rustc.workspace_process();
+                        apply_env_config(gctx, &mut probe)?;
+                        probe.arg("-Zhelp").env_remove("RUSTC_LOG");
+                        rustc
+                            .cached_output(&probe, extra_fingerprint)
+                            .is_ok_and(|(out, _)| out.contains(" public-api-hash="))
+                    };
                 if requested && !supported {
                     gctx.shell().warn(
                         "ignoring `-Zpublic-api-hash`: rustc does not support `-Zpublic-api-hash`",
