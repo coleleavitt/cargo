@@ -456,6 +456,27 @@ pub struct CargoBuildConfig {
     /// Unstable `-Zpublic-api-hash` early cutoff. On by default when rustc accepts
     /// `-Zpublic-api-hash`; `false` turns it off.
     pub public_api_hash: Option<bool>,
+    /// Unstable feature `-Zunit-cache`.
+    pub unit_cache_max_size: Option<SizeConfig>,
+}
+
+/// A size in bytes, or a string with a unit such as `"50GiB"`.
+#[derive(Debug, Clone)]
+pub enum SizeConfig {
+    Bytes(u64),
+    String(String),
+}
+
+impl<'de> Deserialize<'de> for SizeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .u64(|int| Ok(SizeConfig::Bytes(int)))
+            .string(|string| Ok(SizeConfig::String(string.to_owned())))
+            .deserialize(deserializer)
+    }
 }
 
 /// Metrics collection for build analysis.

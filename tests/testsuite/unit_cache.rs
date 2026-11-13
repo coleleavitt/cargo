@@ -374,3 +374,118 @@ fn custom_cache_dir() {
         .with_stderr_does_not_contain("[COMPILING] bar[..]")
         .run();
 }
+
+#[cargo_test]
+fn config_unstable_table_enables_cache() {
+    publish_deps();
+    let a = worktree("wt-a", r#""1.0""#);
+    let b = worktree("wt-b", r#""1.0""#);
+    let config = paths::home().join(".cargo/config.toml");
+    let mut contents = std::fs::read_to_string(&config).unwrap();
+    contents.push_str("\n[unstable]\nunit-cache = true\n");
+    std::fs::write(&config, contents).unwrap();
+    a.cargo("build")
+        .masquerade_as_nightly_cargo(&["unit-cache"])
+        .run();
+    assert!(!entries("bar").is_empty());
+    b.cargo("build")
+        .masquerade_as_nightly_cargo(&["unit-cache"])
+        .with_stderr_does_not_contain("[COMPILING] bar[..]")
+        .with_stderr_contains("[COMPILING] foo v0.1.0 ([ROOT]/wt-b/foo)")
+        .run();
+}
+
+fn publish_libs(names: &[&str]) {
+    for name in names {
+        Package::new(name, "1.0.0")
+            .file("src/lib.rs", "pub fn v() -> u32 { 1 }")
+            .publish();
+    }
+}
+
+/// A worktree with a library that depends on the registry packages `deps`.
+fn lib_worktree(name: &str, deps: &[&str]) -> Project {
+    let deps: String = deps.iter().map(|d| format!("{d} = \"1.0\"\n")).collect();
+    project_in(name)
+        .file(
+            "Cargo.toml",
+            &format!(
+                r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+                {deps}
+                "#
+            ),
+        )
+        .file("src/lib.rs", "")
+        .build()
+}
+
+/// Size of the only cache entry of package `name`.
+fn entry_size(name: &str) -> u64 {
+    fn size(path: &Path) -> u64 {
+        let meta = std::fs::metadata(path).unwrap();
+        if !meta.is_dir() {
+            return meta.len();
+        }
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|e| size(&e.unwrap().path()))
+            .sum()
+    }
+    let [entry] = entries(name).try_into().unwrap();
+    size(&entry)
+}
+
+fn build_with_max_size(p: &Project, max_size: Option<String>) {
+    let mut cmd = p.cargo("build -Zunit-cache");
+    if let Some(max_size) = max_size {
+        cmd.arg("--config")
+            .arg(format!("build.unit-cache-max-size={max_size}"));
+    }
+    cmd.masquerade_as_nightly_cargo(&["unit-cache"]).run();
+}
+
+#[cargo_test]
+fn least_recently_used_entries_evicted_over_max_size() {
+    publish_libs(&["new", "old"]);
+    build_with_max_size(&lib_worktree("wt-a", &["old"]), None);
+    let size = entry_size("old");
+
+    // Room for one and a half entries: the older one goes.
+    build_with_max_size(
+        &lib_worktree("wt-b", &["new"]),
+        Some((size * 3 / 2).to_string()),
+    );
+    assert!(entries("old").is_empty());
+    assert!(!entries("new").is_empty());
+    // Nothing is left behind in the package directory.
+    assert_eq!(
+        std::fs::read_dir(cache_dir().join("old")).unwrap().count(),
+        0
+    );
+}
+
+#[cargo_test]
+fn restoring_an_entry_counts_as_use() {
+    publish_libs(&["new", "old", "third"]);
+    build_with_max_size(&lib_worktree("wt-a", &["old"]), None);
+    let size = entry_size("old");
+    build_with_max_size(&lib_worktree("wt-b", &["new"]), None);
+    lib_worktree("wt-c", &["old"])
+        .cargo("build -Zunit-cache")
+        .masquerade_as_nightly_cargo(&["unit-cache"])
+        .with_stderr_does_not_contain("[COMPILING] old[..]")
+        .run();
+
+    // Room for two and a half entries, given as a size with a unit.
+    let max_size = format!("\"{}KiB\"", size * 5 / 2 / 1024);
+    build_with_max_size(&lib_worktree("wt-d", &["third"]), Some(max_size));
+    assert!(entries("new").is_empty());
+    assert!(!entries("old").is_empty());
+    assert!(!entries("third").is_empty());
+}
