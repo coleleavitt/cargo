@@ -18,7 +18,9 @@ pub struct Job {
 /// Work that replaces a dirty job's own work when `unchanged` returns `true` at the time the
 /// job is started, after its dependencies have finished (early cutoff, `-Zpublic-api-hash`).
 struct Cutoff {
-    unchanged: Box<dyn FnOnce() -> bool + Send>,
+    /// The check, until it has run.
+    check: Option<Box<dyn FnOnce() -> bool + Send>>,
+    unchanged: bool,
     work: Work,
 }
 
@@ -112,7 +114,8 @@ impl Job {
     /// returns `true` when the job is started.
     pub fn set_cutoff(&mut self, unchanged: impl FnOnce() -> bool + Send + 'static, work: Work) {
         self.cutoff = Some(Cutoff {
-            unchanged: Box::new(unchanged),
+            check: Some(Box::new(unchanged)),
+            unchanged: false,
             work,
         });
     }
@@ -129,18 +132,36 @@ impl Job {
         }
     }
 
-    /// Decides the cutoff, if any. Call only once the job's dependencies have finished.
-    pub fn resolve_cutoff(mut self) -> Job {
-        let Some(cutoff) = self.cutoff.take() else {
-            return self;
-        };
-        if !(cutoff.unchanged)() {
-            return self;
+    pub fn has_pending_cutoff(&self) -> bool {
+        self.cutoff
+            .as_ref()
+            .is_some_and(|cutoff| cutoff.check.is_some())
+    }
+
+    /// Runs the cutoff check, if any. Call only once the job's dependencies have finished.
+    pub fn decide_cutoff(&mut self) {
+        if let Some(cutoff) = &mut self.cutoff
+            && let Some(check) = cutoff.check.take()
+        {
+            cutoff.unchanged = check();
         }
-        Job {
-            work: cutoff.work,
-            fresh: Freshness::Fresh,
-            cutoff: None,
+    }
+
+    /// Applies the cutoff, if any, deciding it first if needed. Call only once the job's
+    /// dependencies have finished.
+    pub fn resolve_cutoff(mut self) -> Job {
+        self.decide_cutoff();
+        match self.cutoff.take() {
+            Some(Cutoff {
+                unchanged: true,
+                work,
+                ..
+            }) => Job {
+                work,
+                fresh: Freshness::Fresh,
+                cutoff: None,
+            },
+            _ => self,
         }
     }
 }
