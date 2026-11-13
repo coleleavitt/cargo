@@ -453,6 +453,9 @@ pub struct CargoBuildConfig {
     pub build_std: Option<BuildStdConfig>,
     /// Unstable feature `-Zunit-cache`.
     pub unit_cache_dir: Option<ConfigRelativePath>,
+    /// Unstable `-Zpublic-api-hash` early cutoff. On by default when rustc accepts
+    /// `-Zpublic-api-hash`; `false` turns it off.
+    pub public_api_hash: Option<bool>,
 }
 
 /// Metrics collection for build analysis.

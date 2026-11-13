@@ -364,7 +364,14 @@ impl TargetInfo {
                 None => !features::is_nightly_toolchain(&rustc.version),
             };
 
-            let public_api_hash = gctx.cli_unstable().public_api_hash && {
+            // On by default when rustc accepts the flag; `-Zpublic-api-hash` (or
+            // `[unstable] public-api-hash`) only makes an unsupporting rustc a warning.
+            let requested = gctx.cli_unstable().public_api_hash;
+            let opted_out = gctx.build_config()?.public_api_hash == Some(false)
+                || gctx
+                    .get_env("CARGO_PUBLIC_API_HASH")
+                    .is_ok_and(|v| v == "0" || v == "false");
+            let public_api_hash = !opted_out && {
                 let mut probe = rustc.workspace_process();
                 apply_env_config(gctx, &mut probe)?;
                 probe
@@ -376,7 +383,7 @@ impl TargetInfo {
                     .env_remove("RUSTC_LOG");
                 kind.add_target_arg(&mut probe);
                 let supported = rustc.cached_output(&probe, extra_fingerprint).is_ok();
-                if !supported {
+                if requested && !supported {
                     gctx.shell().warn(
                         "ignoring `-Zpublic-api-hash`: rustc does not support `-Zpublic-api-hash`",
                     )?;
