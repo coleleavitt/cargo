@@ -510,3 +510,117 @@ fn moving_unused_generic_skips_and_moving_used_generic_rebuilds() {
     assert_eq!(panic_location(&p, "target"), "a/src/lib.rs:4:5");
     assert_eq!(panic_location(&p, "clean-target"), "a/src/lib.rs:4:5");
 }
+
+/// The lines of `stderr` that point into `a`'s source.
+fn locations_in_a(stderr: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| line.contains("a/src/lib.rs:"))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn replayed_warning_points_at_moved_dependency_line() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    // `b`'s warning has a note pointing at `a::START`, which is not in `a`'s span hash.
+    let a_lib = "pub struct Counter {\n    pub count: u32,\n}\n// ABOVE\npub const START: Counter = Counter { count: 0 };\n// BELOW\npub fn below() -> u32 {\n    7\n}\n";
+    let p = panic_chain(
+        a_lib,
+        "pub fn run() {\n    a::START.count = 1;\n    let _ = a::below();\n}\n",
+    );
+    let build = |p: &Project, target_dir: &str| {
+        p.cargo("build -Zpublic-api-hash")
+            .masquerade_as_nightly_cargo(&["public-api-hash"])
+            .env("CARGO_TARGET_DIR", p.root().join(target_dir))
+            .with_stderr_contains("[..]a/src/lib.rs:[..]")
+            .run()
+    };
+    assert_eq!(
+        locations_in_a(&build(&p, "target").stderr),
+        ["--> a/src/lib.rs:5:1"]
+    );
+
+    // Lines below `START` move: `b` is skipped and its replayed warning is still right.
+    p.change_file(
+        "a/src/lib.rs",
+        &a_lib.replace("// BELOW\n", "// BELOW\n\n\n"),
+    );
+    let output = build(&p, "target");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("[COMPILING] b") && !stderr.contains("Compiling b"));
+    assert_eq!(
+        locations_in_a(&output.stderr),
+        locations_in_a(&build(&p, "clean-1").stderr)
+    );
+
+    // `START` moves: `b` is recompiled and its warning points at the new line.
+    p.change_file(
+        "a/src/lib.rs",
+        &a_lib
+            .replace("// BELOW\n", "// BELOW\n\n\n")
+            .replace("// ABOVE\n", "// ABOVE\n\n\n"),
+    );
+    let output = build(&p, "target");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Compiling b"));
+    assert_eq!(locations_in_a(&output.stderr), ["--> a/src/lib.rs:7:1"]);
+    assert_eq!(
+        locations_in_a(&output.stderr),
+        locations_in_a(&build(&p, "clean-2").stderr)
+    );
+}
+
+/// The `DW_AT_decl_line` of `Handle` in `foo`'s debuginfo, if `llvm-dwarfdump` is installed.
+fn handle_decl_line(p: &Project, target_dir: &str) -> Option<String> {
+    let output = std::process::Command::new("llvm-dwarfdump")
+        .arg("--name=Handle")
+        .arg(p.root().join(target_dir).join("debug/foo"))
+        .output()
+        .ok()?;
+    let dump = String::from_utf8(output.stdout).unwrap();
+    let line = dump.lines().find(|line| line.contains("DW_AT_decl_line"));
+    Some(line.expect("Handle has a decl_line").trim().to_owned())
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn moved_type_in_debuginfo_rebuilds_dependents() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    // `b`'s debuginfo holds the line of `a::Handle`, which is not in `a`'s span hash.
+    let a_lib = "// ABOVE\npub struct Handle {\n    pub id: u64,\n}\n// BELOW\n";
+    let p = panic_chain(
+        a_lib,
+        "#[inline(never)]\npub fn handle(h: a::Handle) -> u64 {\n    h.id\n}\npub fn run() {\n    let _ = handle(a::Handle { id: 1 });\n}\n",
+    );
+    let build = |p: &Project, target_dir: &str| {
+        p.cargo("build -Zpublic-api-hash")
+            .masquerade_as_nightly_cargo(&["public-api-hash"])
+            .env("RUSTFLAGS", "-Zdebug-info-type-line-numbers")
+            .env("CARGO_TARGET_DIR", p.root().join(target_dir))
+            .run()
+    };
+    build(&p, "target");
+
+    // Lines below `Handle` move: `b` is skipped.
+    p.change_file("a/src/lib.rs", &format!("{a_lib}\n\n"));
+    let stderr = String::from_utf8(build(&p, "target").stderr).unwrap();
+    assert!(!stderr.contains("Compiling b"), "{stderr}");
+    build(&p, "clean-1");
+    assert_eq!(
+        handle_decl_line(&p, "target"),
+        handle_decl_line(&p, "clean-1")
+    );
+
+    // `Handle` moves: `b` is recompiled and its debuginfo has the new line.
+    p.change_file("a/src/lib.rs", &format!("\n\n{a_lib}\n\n"));
+    let stderr = String::from_utf8(build(&p, "target").stderr).unwrap();
+    assert!(stderr.contains("Compiling b"), "{stderr}");
+    build(&p, "clean-2");
+    assert_eq!(
+        handle_decl_line(&p, "target"),
+        handle_decl_line(&p, "clean-2")
+    );
+}

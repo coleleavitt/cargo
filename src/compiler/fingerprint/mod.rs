@@ -630,7 +630,7 @@ struct PublicApiDeps {
     record: PathBuf,
     deps: Vec<(InternedString, PathBuf)>,
     /// rustc and the `.rdr-spans` file rustc writes next to the unit's rmeta, listing the
-    /// upstream items whose code or positions the unit copied.
+    /// upstream items and source lines whose positions the unit copied.
     span_reuse_check: Option<(ProcessBuilder, PathBuf)>,
 }
 
@@ -674,8 +674,8 @@ impl PublicApiDeps {
     }
 
     /// Whether the unit's outputs are still what compiling it against its dependencies' current
-    /// metadata would produce: every public API hash equals the recorded one, and every public
-    /// span hash too, unless rustc confirms that none of the upstream items the unit copied moved.
+    /// metadata would produce: every public API hash equals the recorded one, and rustc confirms
+    /// that no upstream position the unit copied (code, diagnostics, debuginfo) moved.
     fn unchanged(&self) -> bool {
         let Ok(recorded) = paths::read(&self.record) else {
             return false;
@@ -688,31 +688,27 @@ impl PublicApiDeps {
         if current.len() != self.deps.len() {
             return false;
         }
-        let mut spans_changed = false;
         for (name, now) in &current {
             let Some(before) = recorded.get(name) else {
                 return false;
             };
-            if now == before {
-                continue;
-            }
-            let api = |hashes: &str| hashes.split_once(' ').map(|(api, _span)| api.to_owned());
-            match (api(now), api(before)) {
-                (Some(now), Some(before)) if now == before => spans_changed = true,
-                _ => return false,
+            let api = |hashes: &str| hashes.split(' ').next().map(str::to_owned);
+            if api(now) != api(before) {
+                return false;
             }
         }
-        let unchanged = !spans_changed || self.spans_reusable();
+        // Even with unchanged span hashes, the unit's cached diagnostics or debuginfo may show
+        // lines of a dependency's source file that moved; rustc checks both.
+        let unchanged = self.spans_reusable();
         debug!(
-            "public API hashes of dependencies for {:?}: spans_changed={spans_changed} \
-             unchanged={unchanged}",
+            "public API hashes of dependencies for {:?}: unchanged={unchanged}",
             self.record
         );
         unchanged
     }
 
-    /// Asks rustc (`-Zcheck-span-reuse`) whether the upstream items recorded in the unit's
-    /// `.rdr-spans` file kept their positions in the rebuilt dependencies.
+    /// Asks rustc (`-Zcheck-span-reuse`) whether the upstream positions recorded in the unit's
+    /// `.rdr-spans` file are unchanged in the rebuilt dependencies.
     fn spans_reusable(&self) -> bool {
         let Some((rustc, spans)) = &self.span_reuse_check else {
             return false;

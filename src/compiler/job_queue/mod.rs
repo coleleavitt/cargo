@@ -584,6 +584,22 @@ impl<'gctx> DrainState<'gctx> {
             }
         }
 
+        // A cutoff check may run rustc (`-Zpublic-api-hash`), so the checks of the jobs that
+        // are ready run in parallel, at most `-j` at a time.
+        let mut checks: Vec<_> = self
+            .pending_queue
+            .iter_mut()
+            .map(|(_, job, _)| job)
+            .filter(|job| job.has_pending_cutoff())
+            .collect();
+        for chunk in checks.chunks_mut(build_runner.bcx.jobs().max(1) as usize) {
+            std::thread::scope(|s| {
+                for job in chunk {
+                    s.spawn(|| job.decide_cutoff());
+                }
+            });
+        }
+
         // Now that we've learned of all possible work that we can execute
         // try to spawn it so long as we've got a jobserver token which says
         // we're able to perform some parallel work.
