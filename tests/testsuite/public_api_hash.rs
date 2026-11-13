@@ -624,3 +624,87 @@ fn moved_type_in_debuginfo_rebuilds_dependents() {
         handle_decl_line(&p, "clean-2")
     );
 }
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn on_by_default_when_rustc_supports_it() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let p = chain();
+    p.cargo("build -v")
+        .with_stderr_contains("[RUNNING] `rustc --crate-name b [..]-Zpublic-api-hash[..]")
+        .run();
+    p.change_file("a/src/imp.rs", "pub(crate) fn private() -> u32 { 2 }\n");
+    p.cargo("run")
+        .with_stdout_data(str![[r#"
+2
+
+"#]])
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[WARNING] function `unused` is never used
+...
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn opt_out() {
+    if !rustc_supports_public_api_hash() {
+        return;
+    }
+    let p = chain();
+    p.cargo("build -v")
+        .env("CARGO_PUBLIC_API_HASH", "0")
+        .with_stderr_does_not_contain("[..]-Zpublic-api-hash[..]")
+        .run();
+    p.change_file("a/src/imp.rs", "pub(crate) fn private() -> u32 { 2 }\n");
+    p.cargo("build")
+        .env("CARGO_PUBLIC_API_HASH", "0")
+        .with_stderr_contains("[COMPILING] b v0.1.0 ([ROOT]/foo/b)")
+        .run();
+
+    p.change_file(".cargo/config.toml", "[build]\npublic-api-hash = false\n");
+    p.cargo("build -v")
+        .with_stderr_does_not_contain("[..]-Zpublic-api-hash[..]")
+        .run();
+    p.change_file("a/src/imp.rs", "pub(crate) fn private() -> u32 { 3 }\n");
+    p.cargo("build")
+        .with_stderr_contains("[COMPILING] b v0.1.0 ([ROOT]/foo/b)")
+        .run();
+}
+
+#[cargo_test(nightly, reason = "-Zpublic-api-hash is unstable")]
+fn unstable_config_table_requests_it() {
+    let p = chain();
+    p.change_file(".cargo/config.toml", "[unstable]\npublic-api-hash = true\n");
+    if rustc_supports_public_api_hash() {
+        p.cargo("build -v")
+            .masquerade_as_nightly_cargo(&["public-api-hash"])
+            .with_stderr_contains("[RUNNING] `rustc --crate-name a [..]-Zpublic-api-hash[..]")
+            .run();
+    } else {
+        p.cargo("build -v")
+            .masquerade_as_nightly_cargo(&["public-api-hash"])
+            .with_stderr_contains(
+                "[WARNING] ignoring `-Zpublic-api-hash`: rustc does not support `-Zpublic-api-hash`",
+            )
+            .with_stderr_does_not_contain("[RUNNING] `rustc [..]-Zpublic-api-hash[..]")
+            .run();
+    }
+}
+
+#[cargo_test]
+fn silent_no_op_when_rustc_does_not_support_it() {
+    if rustc_supports_public_api_hash() {
+        return;
+    }
+    chain()
+        .cargo("build -v")
+        .with_stderr_does_not_contain("[..]public-api-hash[..]")
+        .run();
+}

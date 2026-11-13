@@ -449,6 +449,9 @@ pub struct CargoBuildConfig {
     /// Unstable feature `-Zchecksum-freshness`.
     pub fingerprint: Option<FingerprintMethod>,
     pub build_std: Option<BuildStdConfig>,
+    /// Unstable `-Zpublic-api-hash` early cutoff. On by default when rustc accepts
+    /// `-Zpublic-api-hash`; `false` turns it off.
+    pub public_api_hash: Option<bool>,
 }
 
 /// Metrics collection for build analysis.
