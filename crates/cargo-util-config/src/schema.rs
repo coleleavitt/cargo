@@ -451,6 +451,27 @@ pub struct CargoBuildConfig {
     pub build_std: Option<BuildStdConfig>,
     /// Unstable feature `-Zunit-cache`.
     pub unit_cache_dir: Option<ConfigRelativePath>,
+    /// Unstable feature `-Zunit-cache`.
+    pub unit_cache_max_size: Option<SizeConfig>,
+}
+
+/// A size in bytes, or a string with a unit such as `"50GiB"`.
+#[derive(Debug, Clone)]
+pub enum SizeConfig {
+    Bytes(u64),
+    String(String),
+}
+
+impl<'de> Deserialize<'de> for SizeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .u64(|int| Ok(SizeConfig::Bytes(int)))
+            .string(|string| Ok(SizeConfig::String(string.to_owned())))
+            .deserialize(deserializer)
+    }
 }
 
 /// Metrics collection for build analysis.
